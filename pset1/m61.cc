@@ -7,6 +7,16 @@
 #include <cassert>
 #include <sys/mman.h>
 
+static m61_statistics global_stats = {
+    .nactive = 0,
+    .active_size = 0,
+    .ntotal = 0,
+    .total_size = 0,
+    .nfail = 0,
+    .fail_size = 0,
+    .heap_min = 0,
+    .heap_max = 0
+};
 
 struct m61_memory_buffer {
     char* buffer;
@@ -46,14 +56,41 @@ m61_memory_buffer::~m61_memory_buffer() {
 void* m61_malloc(size_t sz, const char* file, int line) {
     (void) file, (void) line;   // avoid uninitialized variable warnings
     // Your code here.
-    if (default_buffer.pos + sz > default_buffer.size) {
-        // Not enough space left in default buffer for allocation
+
+    //test 18
+    if (default_buffer.size - default_buffer.pos < sz){
+        ++global_stats.nfail;
+        global_stats.fail_size+=sz;
         return nullptr;
     }
+
+    ++global_stats.ntotal;
+    ++global_stats.nactive;
+    global_stats.total_size+=sz;
 
     // Otherwise there is enough space; claim the next `sz` bytes
     void* ptr = &default_buffer.buffer[default_buffer.pos];
     default_buffer.pos += sz;
+
+    //test 10
+    uintptr_t addr = (uintptr_t) ptr;
+
+    if (global_stats.ntotal == 1){
+        global_stats.heap_min = addr;
+    }
+
+    if (global_stats.ntotal == 1){
+        global_stats.heap_max = addr + sz - 1;
+    }
+
+    if (addr < global_stats.heap_min){
+        global_stats.heap_min = addr;
+    }
+
+    if (addr > global_stats.heap_max){
+        global_stats.heap_max = addr + sz - 1;
+    }
+
     return ptr;
 }
 
@@ -66,7 +103,12 @@ void* m61_malloc(size_t sz, const char* file, int line) {
 
 void m61_free(void* ptr, const char* file, int line) {
     // avoid uninitialized variable warnings
+    if (ptr == nullptr){
+        return;
+    }
+
     (void) ptr, (void) file, (void) line;
+    --global_stats.nactive;
     // Your code here. The handout code does nothing!
 }
 
@@ -80,6 +122,20 @@ void m61_free(void* ptr, const char* file, int line) {
 
 void* m61_calloc(size_t count, size_t sz, const char* file, int line) {
     // Your code here (not needed for first tests).
+
+
+    //test 19 a
+    if (count == 0 || sz==0){
+        return m61_malloc(0);
+    }
+
+    //test 19
+    if (sz > (SIZE_MAX / count)){
+        ++global_stats.nfail;
+        global_stats.fail_size+=count*sz;
+        return nullptr;
+    }
+
     void* ptr = m61_malloc(count * sz, file, line);
     if (ptr) {
         memset(ptr, 0, count * sz);
@@ -95,7 +151,13 @@ m61_statistics m61_get_statistics() {
     // Your code here.
     // The handout code sets all statistics to enormous numbers.
     m61_statistics stats;
-    memset(&stats, 255, sizeof(m61_statistics));
+    // this is what changed for test 0!! (used to have 255 instead of 0)
+    // is the same as just changing each variable individually
+    memset(&stats, 0, sizeof(m61_statistics));
+
+    //set to global_stats
+    stats=global_stats;
+    
     return stats;
 }
 
