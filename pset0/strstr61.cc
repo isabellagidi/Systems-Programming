@@ -42,7 +42,7 @@ char* mystrstr(const char* s1, const char* s2) {
             return (char*) &s1[i];
         }
     }
-    
+
     //special case
     // !s2[0] means "s2 is the empty string!"
     // same as s2[0] == 0
@@ -55,28 +55,57 @@ char* mystrstr(const char* s1, const char* s2) {
 }
 
 
+// this is another way to hand-code it using a pointer into s1 where s2 first appears
+// uses pointers NOT indices to walk the strings
+// inputs are const char* bc dont want to modify the pointers
 char* mystrstr(const char* s1, const char* s2) {
     // loop over s1
+    // *s1 dereferences the pointer, yielding the current character
+    // in C++ a nonzero value is "true" and a zero value is "false"
+    // SO this loop continues while the current character is not '\0' (the NUL terminator)
+    // This is equivalent to ' while (*s1 != '\0')
     while (*s1){
         //loop over s2 until s2 ends of differs from s1
+        // here you create two walkers
+        // s1try starts at the current candidate position in s1
+        //s2try starts at the beginning of s2
+        //both are const char* bc we don't mutate the strings
         const char* s1try = s1;
         const char* s2try = s2;
+
+        // *s2try is same as (*s2try != '\O') -- this is only true if and only if the needle hasn't ended yet
+        // the && is a logical and
+        // *s2try == *s1try is basically saying that the characters are the same
+
         while (*s2try && *s2try == *s1try) {
+
+            // this part advances both pointers one character forward
+            // walking forward as long as the characters match and the needle hasn't ended
             ++s2try;
             ++s1try;
         }
 
         // success if we got to the end of 's2'
+        // !*s2try is true iff *s2try == '\0' bc the ! is the logical NOT
+        // bc this means we reached the end of s2 and if we reached teh end of s2 then we know that every char of s2 matched starting at s1
         if (!*s2try) {
+
+            // we return the start of the match which is the current candidate s1
+            // (char*) s1 casts away const to match the function's return type
             return (char*) s1;
         } 
+
+        // if we reach here, this means that there was NO match at that starting position, so we advance the starting pointer in s1 by one and try again!! (another iteration)
         ++s1;
     }
 
     //special case
+    // if s2 is empty then !*s2 is true!! bc *s2 == 0
     if (!*s2) {
         return (char*) s1;
     }
+
+    // if we finish the outer loop without returning, we know the needle wasn't found and we can return nullptr
 
     return nullptr;
 }
@@ -108,3 +137,24 @@ int main(int argc, char* argv []){
 //strstr searches s1 for the first occurrence of the entire sequence
 // returns a pointer to the start of that match in s1, or else returns nullpts
 // empty needle rule: if s2 is the empty string (""), strstr(s1,"") returns s1
+
+
+// char = a one-byte character
+// char* = "pointer to char" --> a variable that stores a memory address where a char lives
+// C-strings: have a char* pointing to the first byte of a sequence of bytes that ends with a zero byte '\0' (the NUL terminator)
+// *p --> dereference pointer p (reads the char it points to)
+// &x --> address-of variable x (making a pointer to x)
+// p[i] == *(p+i) --> indexing is pointer arithmetic
+
+// ex:
+// const char* s = "cat"; // s points at 'c'
+// *s --> 'c'
+// s[1] --> 'a'
+// *(s+2) --> 't'
+
+// walkers are a nickname for pointers or indices that you advance while scanning data
+
+// const is a type of qualifier that says "you can't modify through this name/type"
+// const char* p; "pointer to const char" -- can move the pointer (p++) but cannot write the character
+// char* const p = ... "const pointer to char" -- you may write tot he char (*p = 'X') but you may not reassign the pointer: p=q
+// const char* const p = ... -- both the pointed to char and the pointer value are non-mutable via p
