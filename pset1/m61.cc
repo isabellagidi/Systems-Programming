@@ -86,6 +86,10 @@ void* m61_malloc(size_t sz, const char* file, int line) {
         return ptr;
     }
 
+    // test 8 !!
+    size_t align = alignof(std::max_align_t);
+    size_t aligned_sz = (sz + align - 1) & ~(align - 1);
+
     //test 18
     if (default_buffer.size - default_buffer.pos < sz){
         ++global_stats.nfail;
@@ -100,7 +104,7 @@ void* m61_malloc(size_t sz, const char* file, int line) {
 
     // Otherwise there is enough space; claim the next `sz` bytes
     ptr = &default_buffer.buffer[default_buffer.pos];
-    default_buffer.pos += sz;
+    default_buffer.pos += aligned_sz; //test 8!!!
 
     active_sizes.insert({ptr, sz});
 
