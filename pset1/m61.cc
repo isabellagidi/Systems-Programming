@@ -6,6 +6,7 @@
 #include <cinttypes>
 #include <cassert>
 #include <sys/mman.h>
+#include <map>
 
 static m61_statistics global_stats = {
     .nactive = 0,
@@ -17,6 +18,9 @@ static m61_statistics global_stats = {
     .heap_min = 0,
     .heap_max = 0
 };
+
+std::map<void*, size_t> active_sizes;
+std::map<void*, size_t> freed_allocations;
 
 struct m61_memory_buffer {
     char* buffer;
@@ -46,6 +50,20 @@ m61_memory_buffer::~m61_memory_buffer() {
 
 
 
+static void* m61_find_free_space(size_t sz) {
+    // do we have a freed allocation that will work?
+
+    for (auto it = freed_allocations.begin(); it != freed_allocations.end(); it++){
+        if(it->second >= sz){
+            void* ptr = it -> first;
+            freed_allocations.erase(ptr);
+            return ptr;
+        }
+    }
+    // otherwise fail
+    return nullptr;
+}
+
 
 /// m61_malloc(sz, file, line)
 ///    Returns a pointer to `sz` bytes of freshly-allocated dynamic memory.
@@ -57,6 +75,17 @@ void* m61_malloc(size_t sz, const char* file, int line) {
     (void) file, (void) line;   // avoid uninitialized variable warnings
     // Your code here.
 
+    void* ptr = m61_find_free_space(sz);
+
+    if (ptr != nullptr) {
+        active_sizes.insert({ptr, sz});
+        ++global_stats.ntotal;
+        ++global_stats.nactive;
+        global_stats.total_size+=sz;
+        global_stats.active_size+=sz;
+        return ptr;
+    }
+
     //test 18
     if (default_buffer.size - default_buffer.pos < sz){
         ++global_stats.nfail;
@@ -67,10 +96,13 @@ void* m61_malloc(size_t sz, const char* file, int line) {
     ++global_stats.ntotal;
     ++global_stats.nactive;
     global_stats.total_size+=sz;
+    global_stats.active_size+=sz;
 
     // Otherwise there is enough space; claim the next `sz` bytes
-    void* ptr = &default_buffer.buffer[default_buffer.pos];
+    ptr = &default_buffer.buffer[default_buffer.pos];
     default_buffer.pos += sz;
+
+    active_sizes.insert({ptr, sz});
 
     //test 10
     uintptr_t addr = (uintptr_t) ptr;
@@ -110,6 +142,16 @@ void m61_free(void* ptr, const char* file, int line) {
     (void) ptr, (void) file, (void) line;
     --global_stats.nactive;
     // Your code here. The handout code does nothing!
+
+
+    auto it = active_sizes.find(ptr);
+    size_t sz = it -> second;
+    global_stats.active_size -= sz;
+
+    freed_allocations.insert({ptr, sz});
+
+    active_sizes.erase(ptr);
+    
 }
 
 
