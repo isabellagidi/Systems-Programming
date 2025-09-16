@@ -19,8 +19,16 @@ static m61_statistics global_stats = {
     .heap_max = 0
 };
 
-std::map<void*, size_t> active_sizes;
+// start a struct that keeps track of both size and aligned size (Phase 2)
+
+struct active_aligned_sizes {
+    size_t sz; //need to keep track of real size for stats
+    size_t aligned_sz; // need to keep track of aligned size for reuse
+};
+
+std::map<void*, active_aligned_sizes> active_sizes;
 std::map<void*, size_t> freed_allocations;
+std::map<void*, size_t> un_coalesced_freed_allocations;
 
 struct m61_memory_buffer {
     char* buffer;
@@ -49,14 +57,24 @@ m61_memory_buffer::~m61_memory_buffer() {
 }
 
 
-
+//sz is known to be aligned sz
 static void* m61_find_free_space(size_t sz) {
     // do we have a freed allocation that will work?
 
     for (auto it = freed_allocations.begin(); it != freed_allocations.end(); it++){
         if(it->second >= sz){
             void* ptr = it -> first;
-            freed_allocations.erase(ptr);
+            size_t block_size = it -> second;
+
+            freed_allocations.erase(it); // could also do .erase(ptr)
+
+            //test27
+
+            if (block_size > sz) {
+                void* remainder_ptr = (char*)ptr + sz;
+                size_t remainder_size = block_size - sz;
+                freed_allocations.insert({remainder_ptr, remainder_size});
+            }
             return ptr;
         }
     }
@@ -64,6 +82,26 @@ static void* m61_find_free_space(size_t sz) {
     return nullptr;
 }
 
+
+bool align_overflow(size_t sz){
+    const size_t align = alignof(std::max_align_t);
+    size_t rem = sz % align;
+    size_t add = 0;
+    if (rem !=0){
+        add = align - rem;
+    } 
+
+    if (SIZE_MAX - sz < add) return true; // overflow has ocurred!
+
+    return false;
+}
+//alignment
+//using bitwise arithmetic
+size_t align_size(size_t sz){
+    size_t align = alignof(std::max_align_t);
+    size_t aligned_sz = (sz + align - 1) & ~(align - 1);
+    return aligned_sz;
+}
 
 /// m61_malloc(sz, file, line)
 ///    Returns a pointer to `sz` bytes of freshly-allocated dynamic memory.
@@ -75,23 +113,45 @@ void* m61_malloc(size_t sz, const char* file, int line) {
     (void) file, (void) line;   // avoid uninitialized variable warnings
     // Your code here.
 
-    void* ptr = m61_find_free_space(sz);
+    if (sz==0){
+        ++global_stats.ntotal;
+        return nullptr;
+    }
+
+    if (align_overflow(sz)){
+        ++global_stats.nfail;
+        global_stats.fail_size +=sz;
+        return nullptr;
+    }
+
+    size_t aligned_sz = align_size(sz);
+
+    void* ptr = m61_find_free_space(aligned_sz);
+
 
     if (ptr != nullptr) {
-        active_sizes.insert({ptr, sz});
+        active_sizes.insert({ptr, {sz, aligned_sz}});
         ++global_stats.ntotal;
         ++global_stats.nactive;
         global_stats.total_size+=sz;
         global_stats.active_size+=sz;
+
+        //test 46 on
+        //boundary write error detection
+
+        size_t padded_sz = aligned_sz - sz;
+
+        if (padded_sz != 0){
+            char* padding_start_ptr = (char*)ptr + sz;
+            memset(padding_start_ptr, 0xAB, padded_sz);
+        }
+
         return ptr;
     }
 
-    // test 8 !!
-    size_t align = alignof(std::max_align_t);
-    size_t aligned_sz = (sz + align - 1) & ~(align - 1);
 
     //test 18
-    if (default_buffer.size - default_buffer.pos < sz){
+    if (default_buffer.size - default_buffer.pos < aligned_sz){
         ++global_stats.nfail;
         global_stats.fail_size+=sz;
         return nullptr;
@@ -106,7 +166,19 @@ void* m61_malloc(size_t sz, const char* file, int line) {
     ptr = &default_buffer.buffer[default_buffer.pos];
     default_buffer.pos += aligned_sz; //test 8!!!
 
-    active_sizes.insert({ptr, sz});
+    //don't use aligned size
+    active_sizes.insert({ptr, {sz, aligned_sz}});
+
+    //test 46 on
+    //boundary write error detection
+
+    size_t padded_sz = aligned_sz - sz;
+
+    if (padded_sz != 0){
+        char* padding_start_ptr = (char*)ptr + sz;
+        memset(padding_start_ptr, 0xAB, padded_sz);
+    }
+
 
     //test 10
     uintptr_t addr = (uintptr_t) ptr;
@@ -115,19 +187,73 @@ void* m61_malloc(size_t sz, const char* file, int line) {
         global_stats.heap_min = addr;
     }
 
+    //using alignment
     if (global_stats.ntotal == 1){
-        global_stats.heap_max = addr + sz - 1;
+        global_stats.heap_max = addr + aligned_sz - 1;
     }
 
     if (addr < global_stats.heap_min){
         global_stats.heap_min = addr;
     }
 
+    //using alignment
     if (addr > global_stats.heap_max){
-        global_stats.heap_max = addr + sz - 1;
+        global_stats.heap_max = addr + aligned_sz - 1;
+    }
+
+    //using alignment
+    //CHANGED test 29
+    if ((addr + aligned_sz - 1) > global_stats.heap_max){
+        global_stats.heap_max = addr + aligned_sz - 1;
     }
 
     return ptr;
+}
+
+// helper function for coalesing test 27-33
+
+void m61_coalesce(std::map<void*, size_t >& freed_allocations_local, void* ptr, size_t sz) {
+    auto it = freed_allocations_local.find(ptr);
+    if (it == freed_allocations_local.end()) return;
+    
+    char* new_ptr = (char*)ptr;
+    size_t new_size = sz;
+
+    if (it != freed_allocations_local.begin()){
+        auto prev_it = std::prev(it);
+        void* prev_ptr = prev_it -> first;
+        size_t prev_sz = prev_it -> second;
+
+        if ((char*)prev_ptr + prev_sz == new_ptr) {
+            new_ptr = (char*)prev_ptr;
+            new_size += prev_sz;
+            freed_allocations_local.erase(prev_it);
+    }
+    }
+    auto next_it = std::next(it);
+    if (next_it != freed_allocations_local.end()){
+        void* next_ptr = next_it -> first;
+        size_t next_sz = next_it -> second;
+
+        if (new_ptr + new_size == (char*)next_ptr) {
+            // new_ptr stays the same
+            new_size += next_sz;
+            freed_allocations_local.erase(next_it);
+        }
+
+    }
+
+    freed_allocations_local.erase(it);
+
+    // WILDERNESS COALESCE - test 29ç
+    uintptr_t buffer_begin = (uintptr_t) default_buffer.buffer + default_buffer.pos;
+    if ((uintptr_t)new_ptr + new_size == buffer_begin){
+        default_buffer.pos -= new_size;
+        return;
+    }
+
+    freed_allocations_local.insert({new_ptr, new_size});
+
 }
 
 
@@ -143,18 +269,65 @@ void m61_free(void* ptr, const char* file, int line) {
         return;
     }
 
+    //phase 3 tests 34-44
+    // check if pointer is inside heap range test 35-37
+    if ((char*)ptr < (char*)global_stats.heap_min || ((char*)ptr > (char*)global_stats.heap_max)){
+            fprintf(stderr, "MEMORY BUG: %s:%d: invalid free of pointer %p, not in heap\n", file, line, ptr);
+            abort();
+    }
+
+    auto it = active_sizes.find(ptr);
+        
+    // check if pointer is valid! () test 40-42 (?)
+    if (it == active_sizes.end()){
+
+        //for double free detection -- after you check it is not in active_sizes -- see if it is in freed_allocations
+        //test 38-39
+        // created un_coalesced_freed_allocations so that it works even with coalescing!!
+        if (un_coalesced_freed_allocations.find(ptr) != un_coalesced_freed_allocations.end()){
+            fprintf(stderr, "MEMORY BUG: %s:%d: invalid free of pointer %p, double free\n", file, line, ptr);
+            abort();
+        }
+
+        fprintf(stderr, "MEMORY BUG: %s:%d: invalid free of pointer %p, not allocated\n", file, line, ptr);
+        abort();
+    }
+
+
     (void) ptr, (void) file, (void) line;
-    --global_stats.nactive;
+
     // Your code here. The handout code does nothing!
 
 
-    auto it = active_sizes.find(ptr);
-    size_t sz = it -> second;
-    global_stats.active_size -= sz;
+    
+    size_t user_sz = it->second.sz;
+    size_t aligned_sz = it->second.aligned_sz;
+    char* padding_start_ptr = (char*)ptr + user_sz;
+    size_t padded_sz  = aligned_sz - user_sz;
+    
+    unsigned char* c = (unsigned char*) padding_start_ptr;
+    for (size_t i = 0; i < padded_sz; i++) {
+        if (c[i] != 0xAB) {
+            fprintf(stderr,
+                "MEMORY BUG: %s:%d: detected wild write during free of pointer %p\n", file, line, ptr);
+            abort();
+        }
+    }
 
-    freed_allocations.insert({ptr, sz});
 
-    active_sizes.erase(ptr);
+    --global_stats.nactive;
+
+    active_aligned_sizes sz = it -> second;
+    global_stats.active_size -= sz.sz;
+
+    //need to use aligned size!!
+
+    freed_allocations.insert({ptr, sz.aligned_sz});
+    un_coalesced_freed_allocations.insert({ptr, sz.aligned_sz});
+
+    m61_coalesce(freed_allocations, ptr, sz.aligned_sz);
+
+    active_sizes.erase(it);
     
 }
 
