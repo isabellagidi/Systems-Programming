@@ -24,11 +24,16 @@ static m61_statistics global_stats = {
 struct active_aligned_sizes {
     size_t sz; //need to keep track of real size for stats
     size_t aligned_sz; // need to keep track of aligned size for reuse
+    const char* file; // for memory leak reporting
+    int line; // for memory leak reporting
 };
 
 std::map<void*, active_aligned_sizes> active_sizes;
 std::map<void*, size_t> freed_allocations;
 std::map<void*, size_t> un_coalesced_freed_allocations;
+
+static constexpr size_t extra_padding = 4;         // for outside memory error
+static constexpr unsigned char expected_pad_value = 0xAB; 
 
 struct m61_memory_buffer {
     char* buffer;
@@ -108,7 +113,7 @@ size_t align_size(size_t sz){
 ///    The memory is not initialized. If `sz == 0`, then m61_malloc may
 ///    return either `nullptr` or a pointer to a unique allocation.
 ///    The allocation request was made at source code location `file`:`line`.
-
+ 
 void* m61_malloc(size_t sz, const char* file, int line) {
     (void) file, (void) line;   // avoid uninitialized variable warnings
     // Your code here.
@@ -118,32 +123,49 @@ void* m61_malloc(size_t sz, const char* file, int line) {
         return nullptr;
     }
 
-    if (align_overflow(sz)){
+    // test 18 guard for padding
+    if (sz > SIZE_MAX - extra_padding) {
         ++global_stats.nfail;
-        global_stats.fail_size +=sz;
+        global_stats.fail_size += sz;
         return nullptr;
     }
 
-    size_t aligned_sz = align_size(sz);
+    size_t need = sz + extra_padding; // this is the very least that we will pad
+
+    // make sure that aligning this won't overflow!
+    if (align_overflow(need)) {
+        ++global_stats.nfail;
+        global_stats.fail_size += sz;
+        return nullptr;
+    }
+
+    // align the NEED (will have the extra padding slack for the memory errors)
+    size_t aligned_sz = align_size(need);
+
+    // checking for overflow if aligned size wraps around (test 18)
+    if (aligned_sz < need) {
+        ++global_stats.nfail;
+        global_stats.fail_size += sz;
+        return nullptr;
+    }
+
+    size_t padded_sz = aligned_sz - sz;
 
     void* ptr = m61_find_free_space(aligned_sz);
 
 
     if (ptr != nullptr) {
-        active_sizes.insert({ptr, {sz, aligned_sz}});
+        active_sizes.insert({ptr, {sz, aligned_sz, file, line}});
         ++global_stats.ntotal;
         ++global_stats.nactive;
         global_stats.total_size+=sz;
         global_stats.active_size+=sz;
 
         //test 46 on
-        //boundary write error detection
-
-        size_t padded_sz = aligned_sz - sz;
-
+        //boundary write error detection (set it to some random value 0xAB so you can check if it has been written there!)
         if (padded_sz != 0){
-            char* padding_start_ptr = (char*)ptr + sz;
-            memset(padding_start_ptr, 0xAB, padded_sz);
+            unsigned char* padding_start_ptr = (unsigned char*)ptr + sz;
+            memset(padding_start_ptr, expected_pad_value, padded_sz);
         }
 
         return ptr;
@@ -167,16 +189,14 @@ void* m61_malloc(size_t sz, const char* file, int line) {
     default_buffer.pos += aligned_sz; //test 8!!!
 
     //don't use aligned size
-    active_sizes.insert({ptr, {sz, aligned_sz}});
+    active_sizes.insert({ptr, {sz, aligned_sz, file, line}});
 
     //test 46 on
     //boundary write error detection
 
-    size_t padded_sz = aligned_sz - sz;
-
     if (padded_sz != 0){
-        char* padding_start_ptr = (char*)ptr + sz;
-        memset(padding_start_ptr, 0xAB, padded_sz);
+        unsigned char* padding_start_ptr = (unsigned char*)ptr + sz;
+        memset(padding_start_ptr, expected_pad_value, padded_sz);
     }
 
 
@@ -290,6 +310,28 @@ void m61_free(void* ptr, const char* file, int line) {
         }
 
         fprintf(stderr, "MEMORY BUG: %s:%d: invalid free of pointer %p, not allocated\n", file, line, ptr);
+
+
+        // Test 55: check if ptr lies inside an active allocation
+        auto contain_it = active_sizes.upper_bound(ptr);
+        if (contain_it != active_sizes.begin()) {
+            --contain_it;   // last allocation whose base ≤ ptr--only possible containing block.                              
+            void* base = contain_it->first;     //the block's start data/ the pointer         
+            const auto& info = contain_it->second;    // this is the info stored in struct (sz, aligned_sz, file, line)   
+
+            // using integers (uintptr_t), not pointer arithmetic  (cast pointers to integers)                 
+            // decide if ptr is inside the user-visible object, not the padding
+            if ((uintptr_t) ptr >= (uintptr_t) base) {                               
+                size_t offset = (size_t)((uintptr_t) ptr - (uintptr_t) base);        
+                if (offset < info.sz) {                    
+                    fprintf(stderr,
+                        "  %s:%d: %p is %zu bytes inside a %zu byte region allocated here\n",
+                        info.file, info.line, ptr, offset, info.sz);
+                }
+            }
+        }
+
+
         abort();
     }
 
@@ -307,7 +349,7 @@ void m61_free(void* ptr, const char* file, int line) {
     
     unsigned char* c = (unsigned char*) padding_start_ptr;
     for (size_t i = 0; i < padded_sz; i++) {
-        if (c[i] != 0xAB) {
+        if (c[i] != expected_pad_value) {
             fprintf(stderr,
                 "MEMORY BUG: %s:%d: detected wild write during free of pointer %p\n", file, line, ptr);
             abort();
@@ -399,4 +441,11 @@ void m61_print_statistics() {
 
 void m61_print_leak_report() {
     // Your code here.
+    for (const auto& key_value : active_sizes) {
+        void* ptr = key_value.first;
+        const auto& info = key_value.second;
+        fprintf(stdout,
+            "LEAK CHECK: %s:%d: allocated object %p with size %zu\n",
+            info.file, info.line, ptr, info.sz);
+    }
 }
