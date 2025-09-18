@@ -7,8 +7,10 @@ collaborators and citations, in `AUTHORS.md`.
 
 Grading notes (if any)
 ----------------------
+N/A
 
 
 
 Extra credit attempted (if any)
 -------------------------------
+Not attempted yet

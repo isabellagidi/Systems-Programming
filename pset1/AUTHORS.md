@@ -8,7 +8,7 @@ Isabella Gidi
 
 Collaborators
 -------------
-[redacted]
+[redacted], Office Hours
 
 
 Citations

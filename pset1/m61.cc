@@ -184,7 +184,7 @@ void* m61_malloc(size_t sz, const char* file, int line) {
     global_stats.total_size+=sz;
     global_stats.active_size+=sz;
 
-    // Otherwise there is enough space; claim the next `sz` bytes
+    // BUFFER: if at this point there is enough space so claim the next sz bytes
     ptr = &default_buffer.buffer[default_buffer.pos];
     default_buffer.pos += aligned_sz; //test 8!!!
 
@@ -222,7 +222,7 @@ void* m61_malloc(size_t sz, const char* file, int line) {
     }
 
     //using alignment
-    //CHANGED test 29
+    // test 29
     if ((addr + aligned_sz - 1) > global_stats.heap_max){
         global_stats.heap_max = addr + aligned_sz - 1;
     }
@@ -315,12 +315,12 @@ void m61_free(void* ptr, const char* file, int line) {
         // Test 55: check if ptr lies inside an active allocation
         auto contain_it = active_sizes.upper_bound(ptr);
         if (contain_it != active_sizes.begin()) {
-            --contain_it;   // last allocation whose base ≤ ptr--only possible containing block.                              
+            --contain_it;   // last allocation whose base less than or eq to ptr--only possible containing block.                              
             void* base = contain_it->first;     //the block's start data/ the pointer         
             const auto& info = contain_it->second;    // this is the info stored in struct (sz, aligned_sz, file, line)   
 
-            // using integers (uintptr_t), not pointer arithmetic  (cast pointers to integers)                 
-            // decide if ptr is inside the user-visible object, not the padding
+            // cast pointers to integers              
+            // check that pointer is not in the padding
             if ((uintptr_t) ptr >= (uintptr_t) base) {                               
                 size_t offset = (size_t)((uintptr_t) ptr - (uintptr_t) base);        
                 if (offset < info.sz) {                    
