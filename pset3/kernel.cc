@@ -4,6 +4,8 @@
 #include "obj/k-firstprocess.h"
 #include <atomic>
 
+// hello
+
 // kernel.cc
 //
 //    This is the kernel.
