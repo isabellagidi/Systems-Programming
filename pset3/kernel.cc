@@ -4,8 +4,6 @@
 #include "obj/k-firstprocess.h"
 #include <atomic>
 
-// hello
-
 // kernel.cc
 //
 //    This is the kernel.
@@ -63,17 +61,32 @@ void kernel_start(const char* command) {
     console_clear();
 
     // (re-)initialize kernel page table
+    // PHASE 1 START
     for (uintptr_t addr = 0; addr < MEMSIZE_PHYSICAL; addr += PAGESIZE) {
-        int perm = PTE_P | PTE_W | PTE_U;
+        int perm;
         if (addr == 0) {
             // nullptr is inaccessible even to the kernel
             perm = 0;
         }
+        //if console address, user access (exception)
+        else if (addr == CONSOLE_ADDR) {
+            perm = PTE_P | PTE_W | PTE_U;
+        }
+        //if in the kernel space, then should NOT be user accessible
+        else if (addr < PROC_START_ADDR) {
+            perm = PTE_P | PTE_W;   // NOTE: no PTE_U
+        }
+        //if in the process region, then still user accessible
+        else {
+            perm = PTE_P | PTE_W | PTE_U;
+        }
+
         // install identity mapping
         int r = vmiter(kernel_pagetable, addr).try_map(addr, perm);
         assert(r == 0); // mappings during kernel_start MUST NOT fail
                         // (Note that later mappings might fail!!)
     }
+    // PHASE 1 END
 
     // set up process descriptors
     for (pid_t i = 0; i < MAXNPROC; i++) {
@@ -91,6 +104,7 @@ void kernel_start(const char* command) {
         process_setup(3, "allocator3");
         process_setup(4, "allocator4");
     }
+
 
     // switch to first process using run()
     run(&ptable[1]);
@@ -116,13 +130,15 @@ void kernel_start(const char* command) {
 //    the `int3` instruction. Executing that instruction will cause a `PANIC:
 //    Unhandled exception 3!` This may help you debug.
 
+//PHASE 4
 void* kalloc(size_t sz) {
     if (sz > PAGESIZE) {
         return nullptr;
     }
 
     int pageno = 0;
-    int page_increment = 1;
+    //PHASE 4
+    int page_increment = 3;
     // In the handout code, `kalloc` returns the first free page.
     // Alternate search strategies can be faster and/or expose bugs elsewhere.
     // This initialization returns a random free page:
@@ -165,45 +181,115 @@ void kfree(void* kptr) {
 //    This loads the application's code and data into memory, sets its
 //    %rip and %rsp, gives it a stack page, and marks it as runnable.
 
+//PHASE 2
+//PHASE 3
+//PHASE 5
 void process_setup(pid_t pid, const char* program_name) {
     init_process(&ptable[pid], 0);
 
     // initialize process page table
-    ptable[pid].pagetable = kernel_pagetable;
+    // PHASE 2 BULLET 1: alloc a new page table for the process with kalloc
+    x86_64_pagetable* pt = kalloc_pagetable();
+    assert(pt != nullptr);
+    ptable[pid].pagetable = pt;
 
+    // PHASE 2 BULLET 2: copy the mapings from kernel_pagetable into this new page table
+    //using vmiter::try_map
+    // match kernel_pagetable until PROC_START_ADDR
+    // used a loop with two vmiters
+    for (uintptr_t a = 0; a < PROC_START_ADDR; a += PAGESIZE) {
+        vmiter kit(kernel_pagetable, a);
+        if (kit.present()) {
+            int r = vmiter(pt, a).try_map(kit.pa(), kit.perm());
+            assert(r == 0);  // guaranteed to succeed as said in pset
+        }
+    }
     // obtain reference to program image
     // (The program image models the process executable.)
     program_image pgm(program_name);
 
     // allocate and map process memory as specified in program image
+    // PHASE 3
     for (auto seg = pgm.begin(); seg != pgm.end(); ++seg) {
-        for (uintptr_t a = round_down(seg.va(), PAGESIZE);
-             a < seg.va() + seg.size();
-             a += PAGESIZE) {
-            // `a` is the process virtual address for the next code/data page
+        //PHASE 2 NEW: keep process-owned pages!!
+        const int uperm = PTE_P | PTE_W | PTE_U;
+        
+        // changing a to va
+        for (uintptr_t va = round_down(seg.va(), PAGESIZE);
+             va < seg.va() + seg.size();
+             va += PAGESIZE) {
+            // *** changed: `va` is the process virtual address for the next code/data page
             // (The handout code requires that the corresponding physical
             // address is currently free.)
-            assert(physpages[a / PAGESIZE].refcount == 0);
-            ++physpages[a / PAGESIZE].refcount;
+            
+            //PHASE 3: allocating any free physical page
+            void* kptr = kalloc(PAGESIZE);
+            assert(kptr != nullptr);
+            uintptr_t pa = reinterpret_cast<uintptr_t>(kptr);
+
+            //PHAE 2 NEW: must map VA to PA in the process's page table
+            int r = vmiter(pt,va).try_map(pa, uperm);
+            assert(r==0);
+            
+            // zero the whole page
+            memset(reinterpret_cast<void*>(pa), 0, PAGESIZE);
+
+            // Copy the portion of segment data that belongs on this page.
+            // Compute where this page intersects the segment's "data" prefix.
+            // seg.data() has seg.data_size() bytes starting at seg.va().
+            uintptr_t seg_data_begin = seg.va();
+            uintptr_t seg_data_end = seg.va() + seg.data_size();
+
+            uintptr_t page_data_start;
+            if (va < seg_data_begin) page_data_start = seg_data_begin;
+            else page_data_start = va;
+
+            uintptr_t page_data_end;
+            if ((va + PAGESIZE) < seg_data_end) page_data_end = va + PAGESIZE;
+            else  page_data_end = seg_data_end;
+
+            if (page_data_start < page_data_end) {
+                size_t nbytes = page_data_end - page_data_start;
+                size_t dst_off = page_data_start - va;         // offset within page
+                size_t src_off = page_data_start - seg_data_begin;  // offset within seg.data()
+
+                memcpy(reinterpret_cast<char*>(reinterpret_cast<void*>(pa)) + dst_off,
+                    seg.data() + src_off,
+                    nbytes);
+            }
+            
+
         }
     }
 
     // copy instructions and data from program image into process memory
-    for (auto seg = pgm.begin(); seg != pgm.end(); ++seg) {
-        memset(reinterpret_cast<void*>(seg.va()), 0, seg.size());
-        memcpy(reinterpret_cast<void*>(seg.va()), seg.data(), seg.data_size());
-    }
+    //for (auto seg = pgm.begin(); seg != pgm.end(); ++seg) {
+    //    memset(reinterpret_cast<void*>(seg.va()), 0, seg.size());
+    //    memcpy(reinterpret_cast<void*>(seg.va()), seg.data(), seg.data_size());
+    //}
 
     // mark entry point
     ptable[pid].regs.reg_rip = pgm.entry();
 
     // allocate and map stack segment
     // Compute process virtual address for stack page
-    uintptr_t stack_addr = PROC_START_ADDR + PROC_SIZE * pid - PAGESIZE;
-    // The handout code requires that the corresponding physical address
-    // is currently free.
-    assert(physpages[stack_addr / PAGESIZE].refcount == 0);
-    ++physpages[stack_addr / PAGESIZE].refcount;
+    // Old Phase 2 version:
+    //uintptr_t stack_addr = PROC_START_ADDR + PROC_SIZE * pid - PAGESIZE;
+
+    //PHASE 5
+    uintptr_t stack_addr = MEMSIZE_VIRTUAL - PAGESIZE;
+
+    {
+        void* kptr = kalloc(PAGESIZE);
+        assert(kptr != nullptr);
+        uintptr_t pa = reinterpret_cast<uintptr_t>(kptr);
+        //NEW: again must map VA to PA
+        int r = vmiter(pt, stack_addr).try_map(pa, PTE_P | PTE_W | PTE_U);
+        assert(r == 0);
+        // zero out the stack page
+        memset(reinterpret_cast<void*>(pa), 0, PAGESIZE);   
+    }
+
     ptable[pid].regs.reg_rsp = stack_addr + PAGESIZE;
 
     // mark process as runnable
@@ -357,12 +443,48 @@ uintptr_t syscall(regstate* regs) {
 //    should implement the specification for `sys_page_alloc`
 //    in `u-lib.hh` (but in the handout code, it does not).
 
+// PHASE 1
+// PHASE 3
 int syscall_page_alloc(uintptr_t addr) {
-    assert(physpages[addr / PAGESIZE].refcount == 0);
-    ++physpages[addr / PAGESIZE].refcount;
-    memset(reinterpret_cast<void*>(addr), 0, PAGESIZE);
+    // PHASE 1: make sure sys_page_alloc preserves kernel isolation
+    //additional check
+    if ((addr & PAGEOFFMASK) != 0 || addr < PROC_START_ADDR || addr >= MEMSIZE_VIRTUAL)
+        return -1;
+    // end change
+
+    //PHASE 3 (using kalloc and new pages)
+    void* new_kptr = kalloc(PAGESIZE);
+    if (!new_kptr) {
+        return -1;  // out of memory
+    }
+    uintptr_t new_pa = reinterpret_cast<uintptr_t>(new_kptr);
+    memset(new_kptr, 0, PAGESIZE);
+
+    vmiter it(current->pagetable, addr);
+    uintptr_t old_pa;
+    if (it.present()) old_pa = it.pa();
+    else old_pa = static_cast<uintptr_t>(-1); 
+    
+
+
+    //PHASE 1: make sure sys_page_alloc preserves kernel isolation
+    // writes page table entry
+    int r = it.try_map(new_pa, PTE_P | PTE_W | PTE_U);
+    //PHASE 3
+    if (r < 0) {
+        // undo allocation
+        physpages[new_pa / PAGESIZE].refcount--;
+        return -1;
+    }
+
+    // if we replaced a page in trymap, we drop its reference
+    if (old_pa != uintptr_t(-1)) {
+        physpages[old_pa / PAGESIZE].refcount--;
+    }
+
     return 0;
 }
+
 
 
 // schedule
