@@ -169,10 +169,21 @@ void* kalloc(size_t sz) {
 // kfree(kptr)
 //    Free `kptr`, which must have been previously returned by `kalloc`.
 //    If `kptr == nullptr` does nothing.
-
+// PHASE 7
 void kfree(void* kptr) {
-    (void) kptr;
-    assert(false /* your code here */);
+    if (!kptr) {
+        return;
+    }
+    uintptr_t pa = reinterpret_cast<uintptr_t>(kptr);
+
+    // check page-aligned 
+    assert((pa & PAGEOFFMASK) == 0);
+    // check from allocatable pool
+    assert(allocatable_physical_address(pa));
+
+    size_t pageno = pa / PAGESIZE;
+    assert(physpages[pageno].refcount > 0);   // must have been allocated
+    --physpages[pageno].refcount;
 }
 
 
@@ -184,6 +195,7 @@ void kfree(void* kptr) {
 //PHASE 2
 //PHASE 3
 //PHASE 5
+//PHASE 8
 void process_setup(pid_t pid, const char* program_name) {
     init_process(&ptable[pid], 0);
 
@@ -197,22 +209,29 @@ void process_setup(pid_t pid, const char* program_name) {
     //using vmiter::try_map
     // match kernel_pagetable until PROC_START_ADDR
     // used a loop with two vmiters
+
+    //PHASE 8 change
     for (uintptr_t a = 0; a < PROC_START_ADDR; a += PAGESIZE) {
-        vmiter kit(kernel_pagetable, a);
-        if (kit.present()) {
-            int r = vmiter(pt, a).try_map(kit.pa(), kit.perm());
-            assert(r == 0);  // guaranteed to succeed as said in pset
+        int perm;
+        if (a == 0) {
+            perm = 0; // null unmapped
+        } else if (a == CONSOLE_ADDR) {
+            perm = PTE_P | PTE_W | PTE_U; // console is user-visible
+        } else {
+            perm = PTE_P | PTE_W;  // kernel-only everywhere else
         }
+        int r = vmiter(pt, a).try_map(a, perm); // identity: VA == PA
+        assert(r == 0);
     }
-    // obtain reference to program image
-    // (The program image models the process executable.)
+    // get reference to program image
     program_image pgm(program_name);
 
     // allocate and map process memory as specified in program image
     // PHASE 3
     for (auto seg = pgm.begin(); seg != pgm.end(); ++seg) {
         //PHASE 2 NEW: keep process-owned pages!!
-        const int uperm = PTE_P | PTE_W | PTE_U;
+        // PHASE 8 CHANGE (make text and code pages truly read-only)
+        const int uperm = PTE_P | PTE_U | (seg.writable() ? PTE_W : 0);
         
         // changing a to va
         for (uintptr_t va = round_down(seg.va(), PAGESIZE);
@@ -227,7 +246,7 @@ void process_setup(pid_t pid, const char* program_name) {
             assert(kptr != nullptr);
             uintptr_t pa = reinterpret_cast<uintptr_t>(kptr);
 
-            //PHAE 2 NEW: must map VA to PA in the process's page table
+            //PHASE 2 NEW: must map VA to PA in the process's page table
             int r = vmiter(pt,va).try_map(pa, uperm);
             assert(r==0);
             
@@ -253,9 +272,7 @@ void process_setup(pid_t pid, const char* program_name) {
                 size_t dst_off = page_data_start - va;         // offset within page
                 size_t src_off = page_data_start - seg_data_begin;  // offset within seg.data()
 
-                memcpy(reinterpret_cast<char*>(reinterpret_cast<void*>(pa)) + dst_off,
-                    seg.data() + src_off,
-                    nbytes);
+                memcpy(reinterpret_cast<char*>(reinterpret_cast<void*>(pa)) + dst_off, seg.data() + src_off, nbytes);
             }
             
 
@@ -273,8 +290,7 @@ void process_setup(pid_t pid, const char* program_name) {
 
     // allocate and map stack segment
     // Compute process virtual address for stack page
-    // Old Phase 2 version:
-    //uintptr_t stack_addr = PROC_START_ADDR + PROC_SIZE * pid - PAGESIZE;
+
 
     //PHASE 5
     uintptr_t stack_addr = MEMSIZE_VIRTUAL - PAGESIZE;
@@ -375,6 +391,11 @@ void exception(regstate* regs) {
 
 
 int syscall_page_alloc(uintptr_t addr);
+// PHASE 6 (forward declaration)
+pid_t syscall_fork();
+// PHASE 7 (forward declarations)
+[[noreturn]] void sys_exit();
+static void free_process_memory(proc* p);
 
 
 // syscall(regs)
@@ -428,6 +449,14 @@ uintptr_t syscall(regstate* regs) {
     case SYSCALL_PAGE_ALLOC:
         return syscall_page_alloc(current->regs.reg_rdi);
 
+    // PHASE 6
+    case SYSCALL_FORK:
+        return syscall_fork();
+    
+    // PHASE 7 
+    case SYSCALL_EXIT:
+        sys_exit(); 
+
     default:
         proc_panic(current, "Unhandled system call %ld (pid=%d, rip=%p)!\n",
                    regs->reg_rax, current->pid, regs->reg_rip);
@@ -450,7 +479,6 @@ int syscall_page_alloc(uintptr_t addr) {
     //additional check
     if ((addr & PAGEOFFMASK) != 0 || addr < PROC_START_ADDR || addr >= MEMSIZE_VIRTUAL)
         return -1;
-    // end change
 
     //PHASE 3 (using kalloc and new pages)
     void* new_kptr = kalloc(PAGESIZE);
@@ -473,18 +501,167 @@ int syscall_page_alloc(uintptr_t addr) {
     //PHASE 3
     if (r < 0) {
         // undo allocation
-        physpages[new_pa / PAGESIZE].refcount--;
+        kfree(new_kptr); // PHASE 7
         return -1;
     }
 
-    // if we replaced a page in trymap, we drop its reference
+    // if replace a page in trymap,  drop its reference
     if (old_pa != uintptr_t(-1)) {
-        physpages[old_pa / PAGESIZE].refcount--;
+        kfree(reinterpret_cast<void*>(old_pa)); // PHASE 7
     }
 
     return 0;
 }
 
+//syscall_fork
+//    Handles the SYSCALL_FORK system call. 
+//    Phase 6 and 7 and 8 implementation. This function
+//    should implement the specification for `sys_fork`
+//    in `u-lib.hh` (but in the handout code, it does not).
+//    As requested in the pset, the code must complete the following
+//      1) look for a free process slot (but don't use slot 0)
+//      2) if a free slot is fount, copy paren't page table for addresses below PROC_START_ADDR
+//      3) for addresses >= PROC_START_ADDR unique child page tables
+//      4) initialize child's registers as copy of parent's (except reg_rax = 0)
+//      5) make child process runnable
+//      6) return 0 to the child and return the child's process ID to parent  
+//      7) if fork fails, clean up (reset child process slot to free state) and return -1
+// pHASE 6
+//PHASE 7
+//PHASE 8
+pid_t syscall_fork() {
+    // 1) look for a free process slot (but don't use slot 0)
+    pid_t child = -1;
+    for (pid_t i = 1; i < MAXNPROC; ++i) {
+        if (ptable[i].state == P_FREE) { child = i; break; }
+    }
+    if (child < 0) {
+        return -1;
+    }
+
+    // 2) if a free slot is fount, copy paren't page table for addresses below PROC_START_ADDR
+    init_process(&ptable[child], 0);
+    ptable[child].pid = child;
+
+    x86_64_pagetable* cpt = kalloc_pagetable();
+    if (!cpt) {
+        ptable[child].state = P_FREE;
+        return -1;
+    }
+    ptable[child].pagetable = cpt;
+
+    // PHASE 8 edit
+    for (uintptr_t a = 0; a < PROC_START_ADDR; a += PAGESIZE) {
+        int perm;
+        if (a == 0) {
+            perm = 0;  // null unmapped
+        } else if (a == CONSOLE_ADDR) {
+            perm = PTE_P | PTE_W | PTE_U; // console user-accessible
+        } else {
+            perm = PTE_P | PTE_W; // kernel-only
+        }
+        int r = vmiter(cpt, a).try_map(a, perm); // identity mapping
+        if (r < 0) goto fail;
+    }
+
+    // 3) for addresses >= PROC_START_ADDR unique child page tables
+    // duplicate parent's user-accessible pages >= PROC_START_ADDR
+    // allocate a fresh physical page, map it in the child at same VA, and copy the parent's bytes
+    // copy kernel mappings, which are identical to kernel_pagetable up to PROC_START_ADDR
+    // PHASE 8 edit!!
+    for (uintptr_t va = PROC_START_ADDR; va < MEMSIZE_VIRTUAL; va += PAGESIZE) {
+        vmiter src(current->pagetable, va);
+        if (!src.present() || !src.user()) {
+            continue; // skip unmapped/kernel-only
+        }
+
+        if (src.writable()) {
+            // writable so make a private copy
+            void* dst_kptr = kalloc(PAGESIZE);
+            if (!dst_kptr) goto fail;
+
+            int r = vmiter(cpt, va).try_map(reinterpret_cast<uintptr_t>(dst_kptr), src.perm()); // same perms, includes U
+            if (r < 0) goto fail;
+
+            const void* src_kptr = src.kptr<const void*>();
+            assert(src_kptr != nullptr);
+            memcpy(dst_kptr, src_kptr, PAGESIZE);
+        } else {
+            // read-only so share the physical page
+            uintptr_t pa = src.pa();
+            int r = vmiter(cpt, va).try_map(pa, src.perm() & ~PTE_W); // ensure RO
+            if (r < 0) goto fail;
+
+            // bump refcount for shared page
+            ++physpages[pa / PAGESIZE].refcount;
+        }
+    }
+
+    // 4) initialize child's registers as copy of parent's (except reg_rax = 0)
+    ptable[child].regs = current->regs;
+    ptable[child].regs.reg_rax = 0;
+
+    // 5) make child process runnable
+    ptable[child].state = P_RUNNABLE;
+
+    // 6) return 0 to the child and return the child's process ID to parent
+    return child;
+
+fail:
+    // PHASE 8 - free any partial mappings in child
+    free_process_memory(&ptable[child]);
+    // 7) if fork fails, clean up (reset child process slot to free state) and return -1
+    ptable[child].state = P_FREE;
+    return -1;
+}
+
+
+//free_process_memory
+//    helper function
+//    frees all user mappings >= PROC_START_ADDR and all page-table pages for p
+// PHASE 7
+static void free_process_memory(proc* p) {
+    if (!p->pagetable) {
+        return;
+    }
+
+    // free all user pages mapped by this process 
+    for (uintptr_t va = PROC_START_ADDR; va < MEMSIZE_VIRTUAL; va += PAGESIZE) {
+        vmiter it(p->pagetable, va);
+        if (it.present() && it.user()) {
+            uintptr_t pa = it.pa();
+            it.map(it.pa(), 0);
+
+            // free the physical page
+            kfree(reinterpret_cast<void*>(pa));
+        }
+    }
+
+    // free the page-table pages (except top level page)
+    for (ptiter pit(p->pagetable); pit.va() < MEMSIZE_VIRTUAL; pit.next()) {
+        kfree(pit.kptr());
+    }
+
+    // free the top-level page table page
+    kfree(p->pagetable);
+    p->pagetable = nullptr;
+}
+
+
+// sys_exit()
+//    to exit the current process--free all of its memory (user pages and page tables),
+//    mark it free, and schedule someone else
+// PHASE 7
+[[noreturn]] void sys_exit() {
+    // free everything owned by current
+    free_process_memory(current);
+
+    // mark the slot free
+    current->state = P_FREE;
+
+    // switch to someone else (does not return)
+    schedule();
+}
 
 
 // schedule
