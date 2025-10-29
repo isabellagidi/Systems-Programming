@@ -6,6 +6,7 @@
 #include <cstring> // memcpy (Phase 2)
 #include <algorithm> // std::min (Phase 2)
 #include <unistd.h>    // read, write, lseek
+#include <cassert>
 
 
 // io61.cc
@@ -17,6 +18,8 @@
 //    Data structure for io61 file wrappers. Add your own stuff.
 //PHASE 2
 // PHASE 3
+//PHASE 4
+//PHASE 5
 struct io61_file {
     int fd = -1;     // file descriptor
     int mode;        // open mode (O_RDONLY or O_WRONLY)
@@ -27,10 +30,19 @@ struct io61_file {
     size_t rbuf_len = 0; // valid bytes currently in rbuf
     size_t rbuf_pos = 0; // next unread index in rbuf
 
+    //Phase 3 change!! write cache
     unsigned char* wbuf = nullptr;
     size_t wbuf_cap = 0;
     size_t wbuf_len = 0; // bytes staged in wbuf
     size_t wbuf_pos = 0;  // bytes already flushed from the front
+
+    //Phase 4 change!! seek correctness 
+    bool seekable = true; // whether or not this fd supports lseek
+    off_t ro_pos = 0;  // next byte offset to return to user
+    off_t rbuf_base = 0;   // file offset corresponding to rbuf[0]
+
+    // Phase 5 change!! mark that the next refill should align down after a seek
+    bool rbuf_after_seek = false;
 };
 
 
@@ -39,24 +51,39 @@ struct io61_file {
 //    O_RDONLY for a read-only file or O_WRONLY for a write-only file.
 //    You need not support read/write files.
 // PHASE 2
+//PHASE 3
+//PHASE 4
 io61_file* io61_fdopen(int fd, int mode) {
     assert(fd >= 0);
     io61_file* f = new io61_file;
     f->fd = fd;
     f->mode = (mode & O_ACCMODE);
 
+
+    //Phase 4 change!! (determine seekability and current pos)
+    off_t cur = lseek(fd, 0, SEEK_CUR);
+    if (cur == (off_t) -1) {
+        f->seekable = false;  
+        f->ro_pos = 0;
+        f->rbuf_base = 0;
+    } else {
+        f->seekable = true;
+        f->ro_pos = cur;
+        f->rbuf_base = cur;
+    }
+
     //Phase 2 change! (read cache)
     if (f->mode == O_RDONLY) {
-        static constexpr size_t IO61_RBUFSZ = 64 * 1024; // 64 KiB
+        static constexpr size_t IO61_RBUFSZ = 64 * 1024; // try 64 KiB
         f->rbuf_cap = IO61_RBUFSZ;
         f->rbuf = new unsigned char[f->rbuf_cap];
         f->rbuf_len = 0;
         f->rbuf_pos = 0;
     }
 
-    // Phase 2 change! (write cache)
+    // Phase 3 change! (write cache)
     if (f->mode == O_WRONLY) {
-        static constexpr size_t IO61_WBUFSZ = 64 * 1024;   // try 64–128 KiB
+        static constexpr size_t IO61_WBUFSZ = 64 * 1024; // try 64–128 KiB
         f->wbuf_cap = IO61_WBUFSZ;
         f->wbuf = new unsigned char[f->wbuf_cap];
         f->wbuf_len = 0;
@@ -84,35 +111,62 @@ int io61_close(io61_file* f) {
 //    Reads a single (unsigned) byte from `f` and returns it. Returns EOF,
 //    which equals -1, on end of file or error.
 // PHASE 2
+//PHASE 4
+// PHASE 5 (same logic as io61_read)
 int io61_readc(io61_file* f) {
-    //guard
-    if (f->mode != O_RDONLY) { 
-        errno = EBADF; 
-        return -1; 
-    }
     // if buffer empty, refill
     while (f->rbuf_pos == f->rbuf_len) {
+        //guard
         if ((f->mode & O_ACCMODE) != O_RDONLY) {
             errno = EBADF;
             return -1;
         }
         // refill buffer
-        ssize_t nr;
-        do {
-            nr = read(f->fd, f->rbuf, f->rbuf_cap);
-        } while (nr < 0 && errno == EINTR);
+        // Phase 4 change!! if refill, then update ro_pos
+        //cache starts at our logical read position
+       // f->rbuf_base = f->ro_pos;
 
-        if (nr <= 0) {
-            // EOF or error
-            if (nr == 0) {
-                errno = 0;  // clean EOF
+        ssize_t nr;
+        if (f->rbuf_after_seek) {
+            off_t cap = (off_t) f->rbuf_cap;
+            off_t base = (f->ro_pos / cap) * cap;
+            (void) lseek(f->fd, base, SEEK_SET);
+            do {
+                nr = read(f->fd, f->rbuf, f->rbuf_cap);
+            } 
+        
+            while (nr < 0 && errno == EINTR);
+
+            if (nr <= 0) {
+                // EOF or error
+                if (nr == 0) errno = 0; // clean EOF
+                return -1;
             }
-            return -1;
+
+            f->rbuf_base = base;
+            f->rbuf_len  = (size_t) nr;
+            off_t rel = f->ro_pos - base;
+            if (rel < 0 || rel > (off_t) f->rbuf_len) rel = 0;
+            f->rbuf_pos = (size_t) rel;
+            f->rbuf_after_seek = false;
+        } else {
+            // normal forward refill 
+            f->rbuf_base = f->ro_pos; // Phase 4 change
+            do {
+                nr = read(f->fd, f->rbuf, f->rbuf_cap);
+            } while (nr < 0 && errno == EINTR);
+
+            if (nr <= 0) {
+                if (nr == 0) errno = 0;
+                return -1;
+            }
+            f->rbuf_len = (size_t) nr;
+            f->rbuf_pos = 0;
         }
-        f->rbuf_len = (size_t) nr;
-        f->rbuf_pos = 0;
+
     }
 
+    f->ro_pos += 1;  // Phase 4 change! advance ro_pos by one byte
     // serve from cache
     return f->rbuf[f->rbuf_pos++];
 }
@@ -131,6 +185,8 @@ int io61_readc(io61_file* f) {
 
 // PHASE 1
 // PHASE 2
+// PHASE 4
+//PHASE 5
 ssize_t io61_read(io61_file* f, unsigned char* buf, size_t sz) {
     // guard
     if ((f->mode & O_ACCMODE) != O_RDONLY) {
@@ -150,15 +206,17 @@ ssize_t io61_read(io61_file* f, unsigned char* buf, size_t sz) {
             std::memcpy(buf + nread, f->rbuf + f->rbuf_pos, take);
             f->rbuf_pos += take;
             nread += take;
+            f->ro_pos += (off_t) take; // Phase 4 change! advance ro_pos
             continue;
         }
 
-        // ff remaining request is large, read directly into user buffer
+        // if remaining request is large, read directly into user buffer
         size_t remain = sz - nread;
         if (remain >= f->rbuf_cap) {
             ssize_t nr = read(f->fd, buf + nread, remain);
             if (nr > 0) {
                 nread += (size_t) nr;
+                f->ro_pos += (off_t) nr; // Phase 4 change!
                 continue;
             }
             if (nr == 0) {  // EOF
@@ -174,23 +232,56 @@ ssize_t io61_read(io61_file* f, unsigned char* buf, size_t sz) {
 
         // if request small, refill cache and copy from it
         ssize_t nr;
-        do {
-            nr = read(f->fd, f->rbuf, f->rbuf_cap);
-        } while (nr < 0 && errno == EINTR);
+        if (f->rbuf_after_seek) {
+            // Phase 5 change! align down so reverse seeks stay inside this window
+            off_t cap = (off_t) f->rbuf_cap;
+            off_t base = (f->ro_pos / cap) * cap;   // floor to block
+            // seek the kernel once here (no lseek in io61_seek)
+            (void) lseek(f->fd, base, SEEK_SET);
+            nr = -1;
+            do {
+                nr = read(f->fd, f->rbuf, f->rbuf_cap);
+            } 
+            
+            while (nr < 0 && errno == EINTR);
 
-        if (nr <= 0) {
-            if (nr == 0) {  // EOF
-                if (nread == 0) errno = 0; // clean EOF if nothing read
-                break;
-            }
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            if (nr <= 0) {
+                if (nr == 0) { if (nread == 0) errno = 0; break; }
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    return nread > 0 ? (ssize_t) nread : -1;
                 return nread > 0 ? (ssize_t) nread : -1;
-            return nread > 0 ? (ssize_t) nread : -1;
+            }
+
+            f->rbuf_base = base;
+            f->rbuf_len  = (size_t) nr;
+
+            // ro_pos inside the block for the seek target
+            off_t rel = f->ro_pos - base;
+            if (rel < 0 || rel > (off_t) f->rbuf_len)
+                rel = 0; // this shouldn't happen for regular files but check anyway
+            f->rbuf_pos = (size_t) rel;
+
+            f->rbuf_after_seek = false;  // consumed the after-seek refill
+        } else {
+            // Phase 2 and 4 orig
+            f->rbuf_base = f->ro_pos;
+            nr = -1;
+            do {
+                nr = read(f->fd, f->rbuf, f->rbuf_cap);
+            } while (nr < 0 && errno == EINTR);
+
+            if (nr <= 0) {
+                if (nr == 0) { if (nread == 0) errno = 0; break; }
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    return nread > 0 ? (ssize_t) nread : -1;
+                return nread > 0 ? (ssize_t) nread : -1;
+            }
+
+            f->rbuf_len = (size_t) nr;
+            f->rbuf_pos = 0;
         }
 
-        f->rbuf_len = (size_t) nr;
-        f->rbuf_pos = 0;
-        // next loop iteration will drain from cache!!
+        // Loop back to drain from cache
     }
 
     return (ssize_t) nread;
@@ -341,29 +432,51 @@ int io61_flush(io61_file* f) {
 
 //PHASE 2
 //PHASE 3
+//PHASE 4
 int io61_seek(io61_file* f, off_t off) {
+    // must be seekable
+    if (!f->seekable) {
+        errno = ESPIPE;
+        return -1;
+    }
 
     // Phase 3 change! (writing)
     // for writing, make sure pending bytes go to the current position
-    if ((f->mode & O_ACCMODE) == O_WRONLY) {
+    if (f->mode  == O_WRONLY) {
         if (io61_flush(f) < 0) {
             return -1;
         }
-    }
-
-    off_t r = lseek(f->fd, (off_t) off, SEEK_SET);
-    // Ignore the returned offset unless it’s an error.
-    if (r == -1) {
-        return -1;
+        off_t r = lseek(f->fd, off, SEEK_SET);
+        return (r == (off_t)-1) ? -1 : 0;
     }
 
     // Phase 2 change! (reading)
     // and Phase 3 change!
-    // seeking invalidates the read cache
-    if ((f->mode & O_ACCMODE) == O_RDONLY) {
-        f->rbuf_len = f->rbuf_pos = 0;
+    // seek miss invalidates the read cache
+    if (f->mode == O_RDONLY) {
+        // Phase 4 change! if the target lies inside our cache window, move the cursor
+        if (f->rbuf_len > 0) {
+            off_t lo = f->rbuf_base;
+            off_t hi = f->rbuf_base + (off_t) f->rbuf_len; // exclusive
+            if (off >= lo && off < hi) {
+                f->rbuf_pos = (size_t) (off - lo);
+                f->ro_pos = off; // Phase 4
+                f->rbuf_after_seek = false;   // Phase 5 change! no need to realign on refill
+                return 0;
+            }
+        }
+
+        // if not, invalidate cache and do a real seek
+        // miss-- invalidate cache and seek kernel
+        // do not lseek
+        f->rbuf_pos = f->rbuf_len = 0;
+        f->ro_pos = off;  // reset r_pos to the new position
+        f->rbuf_base = off;
+        f->rbuf_after_seek = true;   // next refill will align down and lseek
+        return 0;
     }
-    return 0;
+    errno = EBADF;
+    return -1;
 }
 
 // You shouldn't need to change these functions.
