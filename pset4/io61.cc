@@ -74,8 +74,8 @@ io61_file* io61_fdopen(int fd, int mode) {
 
     //Phase 2 change! (read cache)
     if (f->mode == O_RDONLY) {
-        static constexpr size_t IO61_RBUFSZ = 64 * 1024; // try 64 KiB
-        f->rbuf_cap = IO61_RBUFSZ;
+        static constexpr size_t RBUFSZ = 128 * 1024; // tried 64 KiB then tried 128 KiB
+        f->rbuf_cap = RBUFSZ;
         f->rbuf = new unsigned char[f->rbuf_cap];
         f->rbuf_len = 0;
         f->rbuf_pos = 0;
@@ -83,8 +83,8 @@ io61_file* io61_fdopen(int fd, int mode) {
 
     // Phase 3 change! (write cache)
     if (f->mode == O_WRONLY) {
-        static constexpr size_t IO61_WBUFSZ = 64 * 1024; // try 64–128 KiB
-        f->wbuf_cap = IO61_WBUFSZ;
+        static constexpr size_t WBUFSZ = 64 * 1024; // tried 64 KiB
+        f->wbuf_cap = WBUFSZ;
         f->wbuf = new unsigned char[f->wbuf_cap];
         f->wbuf_len = 0;
         f->wbuf_pos = 0;
