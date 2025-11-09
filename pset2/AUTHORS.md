@@ -3,15 +3,14 @@ Author and collaborators
 
 Student
 -------
-(Your name.)
+Isabella Gidi
 
 
 Collaborators
 -------------
-(List any other collaborators and describe help you got from other students
-in the class.)
+[redacted]
 
 
 Citations
 ---------
-(List any other sources consulted.)
+N/A

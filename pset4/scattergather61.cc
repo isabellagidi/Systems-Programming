@@ -66,7 +66,6 @@ int main(int argc, char* argv[]) {
         if (args.read_lines) {
             nr = read_line(infs[ini], buf, args.block_size);
         } else {
-            //nr = io61_read(infs[ini], buf, args.block_size);
             nr = read_block(infs[ini], buf, args.block_size);
         }
         if (nr <= 0) {
