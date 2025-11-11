@@ -66,10 +66,34 @@ command::~command() {
 
 void command::run() {
     assert(this->pid == -1);
-    assert(this->args.size() > 0);
+    assert(!this->args.empty());
     // Your code here!
 
-    fprintf(stderr, "command::run not done yet\n");
+    //Phase 1
+    // Build argv!!
+    // argv = {arg0, arg1, ..., nullptr}
+    std::vector<char*> argv;
+    argv.reserve(this->args.size() + 1);
+    for (std::string& s : this->args) {
+        argv.push_back(const_cast<char*>(s.c_str()));
+    }
+    argv.push_back(nullptr);
+
+    pid_t p = fork();
+    if (p < 0) {
+        // this means fork failed, so exit 
+        fprintf(stderr, "sh61: fork: %s\n", strerror(errno));
+        _exit(EXIT_FAILURE);
+    } else if (p == 0) {
+        // child: replace with target program
+        execvp(argv[0], argv.data());
+        // if execvp returns, it failed
+        fprintf(stderr, "%s: %s\n", argv[0], strerror(errno));
+        _exit(1);
+    } else {
+        // parent: record child PID and return
+        this->pid = p;
+    }
 }
 
 
@@ -99,13 +123,50 @@ void command::run() {
 //       This may require adding another call to `fork()`!
 
 void run_line(command_line_parser clp) {
-    command* c = new command;
-    for (auto tok = clp.token_begin(); tok != clp.end(); ++tok) {
-        c->args.push_back(tok.str());
+    // Phase 2 (Command lits -- iterate each condiition on the command line split by ; and &)
+    for (auto condit = clp.conditional_begin(); condit != clp.end(); ++condit) {
+        auto pipeit = condit.pipeline_begin();
+        if (pipeit == condit.end()) {
+            continue; //empty conditional
+        }
+        auto cmdit = pipeit.command_begin();
+        if (cmdit == pipeit.end()) {
+            continue; //no command found
+        }
+
+        // Build argv (Phase 2 -- just normal tokens)
+        command* c = new command;
+        for (auto tok = cmdit.token_begin(); tok != cmdit.token_end(); ++tok) {
+            if (tok.type() == TYPE_NORMAL) /* TYPE_NORMAL tokens only */ {
+                c->args.push_back(tok.str());
+            } else if (tok.type() == TYPE_REDIRECT_OP) {
+                // skip filename token that follows redirect operator
+                ++tok;
+                if (tok == cmdit.token_end()) break;
+            } else {
+                // ignore other token types inside a simple command
+            }
+        }
+        //skip conditional if no runnable words
+        if (c->args.empty()) {
+            delete c;
+            continue;
+        }
+        // spawn the command
+        c->run();
+        // Phase 1 (wait for child to finish) 
+        if (c->pid > 0) {
+            int status;
+            // retry on EINTR 
+            while (waitpid(c->pid, &status, 0) < 0 && errno == EINTR) {
+                /* retry */
+            }
+        }
+
+        delete c;
     }
-    c->run();
-    delete c;
 }
+
 
 
 int main(int argc, char* argv[]) {
