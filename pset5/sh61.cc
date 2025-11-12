@@ -123,49 +123,77 @@ void command::run() {
 //       This may require adding another call to `fork()`!
 
 void run_line(command_line_parser clp) {
-    // Phase 2 (Command lits -- iterate each condiition on the command line split by ; and &)
+    // Phase 2 (Command lists -- iterate each condiition on the command line split by ; and &)
+    // Phase 2 loop
     for (auto condit = clp.conditional_begin(); condit != clp.end(); ++condit) {
+        //phase 3 loop: Change the loop to handle conditionals.
         auto pipeit = condit.pipeline_begin();
-        if (pipeit == condit.end()) {
-            continue; //empty conditional
-        }
-        auto cmdit = pipeit.command_begin();
-        if (cmdit == pipeit.end()) {
-            continue; //no command found
-        }
+        bool have_prev = false;
+        bool prev_success = false;
+        int  last_status = 0;
+        int  last_op = TYPE_EOL;
 
-        // Build argv (Phase 2 -- just normal tokens)
-        command* c = new command;
-        for (auto tok = cmdit.token_begin(); tok != cmdit.token_end(); ++tok) {
-            if (tok.type() == TYPE_NORMAL) /* TYPE_NORMAL tokens only */ {
-                c->args.push_back(tok.str());
-            } else if (tok.type() == TYPE_REDIRECT_OP) {
-                // skip filename token that follows redirect operator
-                ++tok;
-                if (tok == cmdit.token_end()) break;
-            } else {
-                // ignore other token types inside a simple command
-            }
-        }
-        //skip conditional if no runnable words
-        if (c->args.empty()) {
-            delete c;
-            continue;
-        }
-        // spawn the command
-        c->run();
-        // Phase 1 (wait for child to finish) 
-        if (c->pid > 0) {
-            int status;
-            // retry on EINTR 
-            while (waitpid(c->pid, &status, 0) < 0 && errno == EINTR) {
-                /* retry */
-            }
-        }
+        //Phase 3 while loop
+        while (pipeit != condit.end()) {
+            //decide whether to run current pipeline pipeit based on the previous result and operator
+            bool should_run = !have_prev || (last_op == TYPE_AND && prev_success) || (last_op == TYPE_OR  && !prev_success);
 
-        delete c;
+            if (should_run) { //if boolean true
+                // Grab first command of this pipeline
+                auto cmdit = pipeit.command_begin();
+
+                // Build argv (Phase 2 -- just normal tokens)
+                command* c = new command;
+                if (cmdit != pipeit.end()) {
+                    for (auto tok = cmdit.token_begin(); tok != cmdit.token_end(); ++tok) {
+                        if (tok.type() == TYPE_NORMAL) /* TYPE_NORMAL tokens only */ {
+                            c->args.push_back(tok.str());
+                        } else if (tok.type() == TYPE_REDIRECT_OP) {
+                            // skip filename token that follows redirect operator
+                            ++tok;
+                            if (tok == cmdit.token_end()) break;
+                        } else {
+                            // ignore other token types inside a simple command
+                        }
+                    }
+                }
+
+                //skip conditional if no runnable words
+                if (!c->args.empty()) {
+                    // spawn the command
+                    c->run();
+                    // Phase 1 (wait for child to finish) 
+                    if (c->pid > 0) {
+                        int status;
+                        // retry on EINTR 
+                        while (waitpid(c->pid, &status, 0) < 0 && errno == EINTR) {
+                            /* retry */
+                        }
+                        last_status = status;
+                        prev_success = (WIFEXITED(status) && WEXITSTATUS(status) == 0);
+                        have_prev = true;
+                    }
+                } 
+                else{
+                    // if c->args.empty()
+                    // treat empty command as non-success!!
+                    prev_success = false;
+                    // mark that we've evaluated something
+                    have_prev = true;
+                }
+                delete c;
+            }
+
+        // for the WHILE loop phase 3!! 
+        //Operator to the NEXT pipeline and advance
+        int op = pipeit.next_op();   // TYPE_AND or TYPE_OR or TYPE_EOL
+        ++pipeit;
+        last_op = op;
+
+        }
     }
 }
+
 
 
 
