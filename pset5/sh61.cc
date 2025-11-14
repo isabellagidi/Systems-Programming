@@ -84,11 +84,10 @@ void command::run() {
     argv.push_back(nullptr);
 
     pid_t p = fork();
-    if (p < 0) {
-        // this means fork failed, so exit 
+    if (p < 0) { //fork failed
         fprintf(stderr, "sh61: fork: %s\n", strerror(errno));
-        _exit(EXIT_FAILURE);
-    } else if (p == 0) {
+        _exit(EXIT_FAILURE); //exit
+    } else if (p == 0) { //child
         // Phase 4 add!! set up pipeline redirection for this child process
         if (this->in_fd != -1) {
             if (dup2(this->in_fd, STDIN_FILENO) < 0) {
@@ -115,13 +114,12 @@ void command::run() {
         // if execvp returns, it failed
         fprintf(stderr, "%s: %s\n", argv[0], strerror(errno));
         _exit(1);
-    } else {
-        // parent: record child PID and return
-        this->pid = p;
+    } else { //parent
+        this->pid = p; //record child PID and return
     }
 }
 
-//run_pipeline(condit)
+//run_pipeline(pipeit)
 //      PHASE 4
 //      Runs one pipeline (joined by |) and returns the last command's wait status
 template <typename PipelineParser>
@@ -273,7 +271,6 @@ void run_line(command_line_parser clp) {
         int _status = run_conditional(condit);
     }
 }
-
 
 
 
