@@ -266,9 +266,26 @@ void run_line(command_line_parser clp) {
     // Phase 2 (Command lists -- iterate each condiition on the command line split by ; and &)
     // Phase 2 loop
     for (auto condit = clp.conditional_begin(); condit != clp.end(); ++condit) {
-        //Phase 3: Change the loop to handle conditionals
+        //Phase 3: Change the loop to handle conditionals (call conditionals function)
         // Phase 4: NOTE run_conditional calls run_pipeline
-        int _status = run_conditional(condit);
+        // Phase 5: run in background!
+
+        int sep = condit.next_op(); // TYPE_SEQUENCE, TYPE_BACKGROUND, or TYPE_EOL
+        if (sep == TYPE_BACKGROUND){ // if &
+            //Run this conditional in the background and fork a subshell
+            pid_t p = fork();
+            if (p < 0){ // failed (foreground failure)
+                fprintf(stderr, "sh61 fork: %s\n", strerror(errno));
+                (void) run_conditional(condit);
+            } else if (p == 0){ //child
+                int st = run_conditional(condit);
+                _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 1);
+            } else{ // parent (do not wait and continue to next conditional)
+            }
+        } else{ //i.e. not background 
+            int _status = run_conditional(condit);
+            (void) _status;
+        }
     }
 }
 
@@ -335,6 +352,31 @@ int main(int argc, char* argv[]) {
 
         // Handle zombie processes and/or interrupt requests
         // Your code here!
+        //Phase 6!!
+        {
+            int status;
+            // Reap all exited children without blocking
+            // Clean up earlier stages of pipelines and background subshells
+            // Loop because multiple children may have exited!
+            while (true) {
+                pid_t wp = waitpid(-1, &status, WNOHANG);
+                if (wp > 0) {
+                    // reaped one; loop to see if more are ready
+                    continue;
+                } else if (wp == 0) {
+                    // no more exited children right now
+                    break;
+                } else { // wp < 0
+                    if (errno == EINTR) {
+                        // interrupted by a signal; try again
+                        continue;
+                    }
+                    // if get here, likely ECHILD--no children
+                    break;
+                }
+            }
+        }
+
     }
 
     return 0;
