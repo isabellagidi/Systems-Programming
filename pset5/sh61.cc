@@ -25,6 +25,11 @@ struct command {
     // Phase4!! pipeline I/O
     int in_fd = -1;   // becomes stdin
     int out_fd = -1;  // becomes stdout
+
+    // Phase 7!! redirection filenames (empty string means no redirection)
+    std::string in_file;   // <
+    std::string out_file;  // >
+    std::string err_file;  // 2>
 };
 
 
@@ -108,6 +113,47 @@ void command::run() {
         if (this->out_fd != -1 && this->out_fd != STDOUT_FILENO) {
             close(this->out_fd);
         }
+
+        // Phase 7!!
+        // Apply after pipeline wiring so file redirections override pipes!
+        if (!this->in_file.empty()) {
+            int fd = open(this->in_file.c_str(), O_RDONLY);
+            if (fd < 0) {
+                fprintf(stderr, "%s: %s\n", this->in_file.c_str(), strerror(errno));
+                _exit(1);
+            }
+            if (dup2(fd, STDIN_FILENO) < 0) {
+                fprintf(stderr, "dup2: %s\n", strerror(errno));
+                _exit(1);
+            }
+            close(fd);
+        }
+
+        if (!this->out_file.empty()) {
+            int fd = open(this->out_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            if (fd < 0) {
+                fprintf(stderr, "%s: %s\n", this->out_file.c_str(), strerror(errno));
+                _exit(1);
+            }
+            if (dup2(fd, STDOUT_FILENO) < 0) {
+                fprintf(stderr, "dup2: %s\n", strerror(errno));
+                _exit(1);
+            }
+            close(fd);
+        }
+
+        if (!this->err_file.empty()) {
+            int fd = open(this->err_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            if (fd < 0) {
+                fprintf(stderr, "%s: %s\n", this->err_file.c_str(), strerror(errno));
+                _exit(1);
+            }
+            if (dup2(fd, STDERR_FILENO) < 0) {
+                fprintf(stderr, "dup2: %s\n", strerror(errno));
+                _exit(1);
+            }
+            close(fd);
+        }
         // Phase 1
         // child: replace with target program
         execvp(argv[0], argv.data());
@@ -117,6 +163,97 @@ void command::run() {
     } else { //parent
         this->pid = p; //record child PID and return
     }
+}
+
+//for run_cd
+static inline int synthesized_status(int code) {
+    return (code & 0xFF) << 8;   // pack exit code into waitpid-style status
+}
+
+// Phase 8!! 
+// cd helper function (single-command case only)
+// Applies redirections in the parent, performs chdir, restores FDs, sets *out_status to a synthesized wait status, and deletes all commands
+static void run_cd(std::vector<command*>& cmds, int* out_status) {
+    command* c = cmds[0];
+
+    //Save originals if we will redirect them
+    int saved_in  = -1, saved_out = -1, saved_err = -1;
+    auto restore_fds = [&](){
+        if (saved_in  != -1) { dup2(saved_in,  STDIN_FILENO);  close(saved_in);  }
+        if (saved_out != -1) { dup2(saved_out, STDOUT_FILENO); close(saved_out); }
+        if (saved_err != -1) { dup2(saved_err, STDERR_FILENO); close(saved_err); }
+    };
+
+    //Apply redirections in the parent
+    if (!c->in_file.empty()) {
+        int fd = open(c->in_file.c_str(), O_RDONLY);
+        if (fd < 0) {
+            fprintf(stderr, "%s: %s\n", c->in_file.c_str(), strerror(errno));
+            for (auto* d : cmds) delete d;
+            *out_status = synthesized_status(1);
+            return;
+        }
+        saved_in = dup(STDIN_FILENO);
+        dup2(fd, STDIN_FILENO);
+        close(fd);
+    }
+
+    if (!c->out_file.empty()) {
+        int fd = open(c->out_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (fd < 0) {
+            fprintf(stderr, "%s: %s\n", c->out_file.c_str(), strerror(errno));
+            restore_fds();
+            for (auto* d : cmds) delete d;
+            *out_status = synthesized_status(1);
+            return;
+        }
+        saved_out = dup(STDOUT_FILENO);
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+    }
+
+    if (!c->err_file.empty()) {
+        int fd = open(c->err_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (fd < 0) {
+            fprintf(stderr, "%s: %s\n", c->err_file.c_str(), strerror(errno));
+            restore_fds();
+            for (auto* d : cmds) delete d;
+            *out_status = synthesized_status(1);
+            return;
+        }
+        saved_err = dup(STDERR_FILENO);
+        dup2(fd, STDERR_FILENO);
+        close(fd);
+    }
+
+    //Resolve target directory and run chdir
+    const char* path = nullptr;
+    if (c->args.size() == 1) {
+        path = getenv("HOME");
+        if (!path || !*path) path = "/";
+    } else if (c->args.size() == 2) {
+        path = c->args[1].c_str();
+    } else {
+        // Too many arguments (goes to stderr)
+        fprintf(stderr, "cd: too many arguments\n");
+        restore_fds();
+        for (auto* d : cmds) delete d;
+        *out_status = synthesized_status(1);
+        return;
+    }
+
+    int rc = chdir(path);
+    int code = 0;
+    if (rc < 0) {
+        // Error message
+        fprintf(stderr, "cd: %s: %s\n", path, strerror(errno));
+        code = 1;
+    }
+
+    // Restore parent and clean up
+    restore_fds();
+    for (auto* d : cmds) delete d;
+    *out_status = synthesized_status(code);
 }
 
 //run_pipeline(pipeit)
@@ -134,9 +271,20 @@ static int run_pipeline(PipelineParser pipeit) {
             if (tok.type() == TYPE_NORMAL) /* TYPE_NORMAL tokens only */ {
                 c->args.push_back(tok.str());
             } else if (tok.type() == TYPE_REDIRECT_OP) {
-                // skip filename token that follows redirect operator
-                ++tok;
-                if (tok == cmdit.token_end()) break;
+                // Phase 7 (redirect) 
+                //grab operator and the following filename 
+                std::string op = tok.str();
+                ++tok;  // move to filename
+                if (tok == cmdit.token_end()) break;  // in case no filename
+                std::string filename = tok.str();
+
+                if (op == "<") {
+                    c->in_file = filename;
+                } else if (op == ">") {
+                    c->out_file = filename;
+                } else if (op == "2>") {
+                    c->err_file = filename;
+                }
             } else {
                 // ignore other token types inside a simple command
             }
@@ -145,9 +293,18 @@ static int run_pipeline(PipelineParser pipeit) {
         cmds.push_back(c);
     }
 
-    auto synthesized_status = [](int code) {
-        return (code & 0xFF) << 8; // fabricate a wait status with given exit code
-    };
+    // Phase 8!! Built-in cd helper function (only when the pipeline has exactly one command)
+    // Run cd in the parent so it changes the shell's cwd and return a synthesized status
+    int builtin_status;
+    if (cmds.size() == 1 && !cmds[0]->args.empty() && cmds[0]->args[0] == "cd") {  //check if cd
+        run_cd(cmds, &builtin_status);
+        return builtin_status;
+    }
+
+
+    if (cmds.empty()) {
+        return synthesized_status(1);
+    }
     
     // create pipes and wire in_fd/out_fd across the chain
     int prev_read_fd = -1;
