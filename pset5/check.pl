@@ -651,8 +651,38 @@ sub CMD_KILL ()           { "CMD_KILL" }
       'yes',
       CMD_CLEANUP => 'sleep 0.15',
       CMD_INT_DELAY => 0.07,
-      CMD_SKIP => 1 ]
+      CMD_SKIP => 1 ],
 
+      # Variable substitution (extra credit!!)
+    [ 'Test VAR1',
+      'expand $HOME in args',
+      'test -n "$HOME" && echo OK',
+      'OK' ],
+
+    [ 'Test VAR2',
+      'expand ${HOME} with suffix disambiguation',
+      'echo A${HOME}s | grep -q "^A..*s$" && echo OK',
+      'OK' ],
+
+    [ 'Test VAR3',
+      'adjacent expansions concatenate',
+      'echo $HOME${HOME} | grep -F -o "$HOME" | wc -l',
+      '2' ],
+
+    [ 'Test VAR4',
+      'expansion in redirection target',
+      'echo hi > "$HOME"/.sh61_var_%% && tail -n 1 "$HOME"/.sh61_var_%% ; rm -f "$HOME"/.sh61_var_%%',
+      'hi' ],
+
+    [ 'Test VAR5',
+      'unset variable expands to empty',
+      'test -z "$SH61_EXPAND_NOT_SET" && echo OK',
+      'OK' ],
+
+    [ 'Test VAR6',
+      'expand ${USER}/bin contains slash',
+      'echo ${USER}/bin | grep -q / && echo OK',
+      'OK' ]
 
     );
 

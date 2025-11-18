@@ -4,6 +4,7 @@
 #include <vector>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <cctype> //extra credit
 
 // For the love of God
 #undef exit
@@ -165,14 +166,71 @@ void command::run() {
     }
 }
 
-//for run_cd
+//expand_vars
+//      EXTRA CREDIT!! Variable substitution
+//      Expand $NAME and ${NAME} using getenv
+//      Unset variables expand to ""
+//      ignore quoting/escaping
+//      only support A-Z a-z 0-9 in names
+static std::string expand_vars(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ) {
+        if (s[i] != '$') {
+            out.push_back(s[i++]);
+            continue;
+        }
+
+        // s[i] == '$'
+        if (i + 1 < s.size() && s[i + 1] == '{') {
+            // ${NAME}
+            size_t j = i + 2;
+            while (j < s.size() && (std::isalnum(static_cast<unsigned char>(s[j])) || s[j] == '_')) {
+                ++j;
+            }
+            if (j < s.size() && s[j] == '}') {
+                std::string name = s.substr(i + 2, j - (i + 2));
+                const char* val = name.empty() ? "" : std::getenv(name.c_str());
+                if (val) out.append(val);
+                i = j + 1;
+                continue;
+            } else {
+                out.push_back(s[i++]);
+                continue;
+            }
+        } else {
+            // $NAME
+            size_t j = i + 1;
+            if (j < s.size() && (std::isalpha(static_cast<unsigned char>(s[j])) || s[j] == '_')) {
+                ++j;
+                while (j < s.size() && (std::isalnum(static_cast<unsigned char>(s[j])) || s[j] == '_')) {
+                    ++j;
+                }
+                std::string name = s.substr(i + 1, j - (i + 1));
+                const char* val = name.empty() ? "" : std::getenv(name.c_str());
+                if (val) out.append(val);
+                i = j;
+                continue;
+            } else {
+                // '$' not followed by a valid name!
+                out.push_back(s[i++]);
+                continue;
+            }
+        }
+    }
+    return out;
+}
+
+
+//for run_cd, etc.
 static inline int synthesized_status(int code) {
     return (code & 0xFF) << 8;   // pack exit code into waitpid-style status
 }
 
-// Phase 8!! 
-// cd helper function (single-command case only)
-// Applies redirections in the parent, performs chdir, restores FDs, sets *out_status to a synthesized wait status, and deletes all commands
+// run_cd(cmds, out_status)
+//      phase 8!! 
+//      cd helper function (single-command case only)
+//      Applies redirections in the parent, performs chdir, restores FDs, sets out_status to a synthesized wait status, and deletes all commands
 static void run_cd(std::vector<command*>& cmds, int* out_status) {
     command* c = cmds[0];
 
@@ -269,14 +327,20 @@ static int run_pipeline(PipelineParser pipeit) {
         // Build argv (Phase 2 -- just normal tokens)
         for (auto tok = cmdit.token_begin(); tok != cmdit.token_end(); ++tok) {
             if (tok.type() == TYPE_NORMAL) /* TYPE_NORMAL tokens only */ {
-                c->args.push_back(tok.str());
+                //EXTRA CREDIT: variable substitution
+                //change here!
+                std::string word = expand_vars(tok.str());
+                c->args.push_back(word);
             } else if (tok.type() == TYPE_REDIRECT_OP) {
                 // Phase 7 (redirect) 
                 //grab operator and the following filename 
                 std::string op = tok.str();
                 ++tok;  // move to filename
                 if (tok == cmdit.token_end()) break;  // in case no filename
-                std::string filename = tok.str();
+
+                // EXTRA CREDIT: variable substitution for redirect targets too
+                std::string filename = expand_vars(tok.str());
+                //EXTRA CREDIT END
 
                 if (op == "<") {
                     c->in_file = filename;
