@@ -7,6 +7,8 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <atomic> // new
+#include <thread>
+#include <vector>
 
 // io61.cc
 //    YOUR CODE HERE!
@@ -30,6 +32,16 @@ struct io61_file {
     // Positioned mode
     std::atomic<bool> dirty = false;       // has cache been written? // made atomic
     bool positioned = false;  // is cache in positioned mode?
+
+
+    //Phase 2: fine-grained range locks
+    struct range_lock{
+        off_t off;
+        off_t len;
+        std::thread::id owner;
+    };
+    std::mutex range_mutex;
+    std::vector<range_lock> range_locks;
 
     // Phase 1: coarse-grained flock lock
     std::recursive_mutex flock_mutex;
@@ -384,14 +396,27 @@ int io61_try_lock(io61_file* f, off_t off, off_t len, int locktype) {
         return 0;
     }
 
-    if (f->flock_mutex.try_lock()){
-        // lock obtained
-        return 0;
+    std::unique_lock<std::mutex> guard(f->range_mutex);
+
+    off_t req_start = off;
+    off_t req_end = off + len;
+    auto me = std::this_thread::get_id();
+
+    //check for conflicts
+    for (auto const& lock : f->range_locks){
+        off_t lock_start = lock.off;
+        off_t lock_end = lock.off + lock.len;
+
+        bool overlap = !(req_end <= lock_start || lock_end <= req_start);
+        if (overlap){
+            errno = EAGAIN;
+            return -1;
+        }
     }
-    else {
-        errno = EAGAIN;
-        return -1;
-    };
+
+    //no conflicts, so we can acquire the lock and add it to range_locks
+    f->range_locks.push_back(io61_file::range_lock{off, len, me});
+    return 0;
 }
 
 
@@ -429,7 +454,17 @@ int io61_unlock(io61_file* f, off_t off, off_t len) {
     if (len == 0) {
         return 0;
     }
-    f->flock_mutex.unlock();
+    
+    std::unique_lock<std::mutex> guard(f->range_mutex);
+    auto me = std::this_thread::get_id();
+
+    for (auto it = f->range_locks.begin(); it != f->range_locks.end();++it){
+        if (it->off == off && it->len == len && it->owner == me){
+            f->range_locks.erase(it);
+            return 0;
+        }
+    }
+    //if thread doesn't hold lock -- undef behavior!
     return 0;
 }
 
