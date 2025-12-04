@@ -38,6 +38,7 @@ struct io61_file {
     struct range_lock{
         off_t off;
         off_t len;
+        int locktype; //EC
         std::thread::id owner;
     };
     std::mutex range_mutex;
@@ -417,7 +418,7 @@ static int io61_pfill(io61_file* f, off_t off) {
 int io61_try_lock(io61_file* f, off_t off, off_t len, int locktype) {
     (void) f;
     assert(off >= 0 && len >= 0);
-    assert(locktype == LOCK_EX);
+    assert(locktype == LOCK_EX || locktype == LOCK_SH); //EC
     if (len == 0) {
         return 0;
     }
@@ -429,19 +430,31 @@ int io61_try_lock(io61_file* f, off_t off, off_t len, int locktype) {
     auto me = std::this_thread::get_id();
 
     //check for conflicts
+    //EC: check for conflicts depending on type (LOCK_EX or LOCK_SH)
     for (auto const& lock : f->range_locks){
         off_t lock_start = lock.off;
         off_t lock_end = lock.off + lock.len;
 
         bool overlap = !(req_end <= lock_start || lock_end <= req_start);
-        if (overlap){
+        if (!overlap){
+            continue;
+        }
+
+        if (locktype == LOCK_EX) {
+            // deny if exclusive request conflicts with ANY overlapping lock
             errno = EAGAIN;
             return -1;
+        } else { // requesting LOCK_SH
+            // deny if shared request conflicts only with overlapping EX locks (SH locks are fine)
+            if (lock.locktype == LOCK_EX) {
+                errno = EAGAIN;
+                return -1;
+            }
         }
     }
 
     //no conflicts, so we can acquire the lock and add it to range_locks
-    f->range_locks.push_back(io61_file::range_lock{off, len, me});
+    f->range_locks.push_back(io61_file::range_lock{off, len, locktype, me});
     return 0;
 }
 
@@ -458,7 +471,7 @@ int io61_try_lock(io61_file* f, off_t off, off_t len, int locktype) {
 
 int io61_lock(io61_file* f, off_t off, off_t len, int locktype) {
     assert(off >= 0 && len >= 0);
-    assert(locktype == LOCK_EX);
+    assert(locktype == LOCK_EX || locktype == LOCK_SH); //EC
     if (len == 0) {
         return 0;
     }
@@ -477,16 +490,29 @@ int io61_lock(io61_file* f, off_t off, off_t len, int locktype) {
             off_t lock_end = lock.off + lock.len;
             
             //check for conflicts
+            //EC: check for conflicts depending on type (LOCK_EX or LOCK_SH)
+
             bool overlap =! (req_end <= lock_start || lock_end <= req_start);
-            if (overlap){
+            if (!overlap){
+                continue;
+            }
+
+            if (locktype == LOCK_EX) {
+                // note if exclusive request conflicts with ANY overlapping lock
                 conflict = true;
                 break;
+            } else { // requesting LOCK_SH
+                // note if shared request only conflicts with overlapping EX locks
+                if (lock.locktype == LOCK_EX) {
+                    conflict = true;
+                    break;
+                }
             }
         }
 
         if (!conflict) {
             //no conflicts, so we can acquire the lock, add it to range_locks, and return
-            f->range_locks.push_back(io61_file::range_lock{off, len, me});
+            f->range_locks.push_back(io61_file::range_lock{off, len, locktype, me});
             return 0;
         }
 

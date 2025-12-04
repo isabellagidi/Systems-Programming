@@ -12,3 +12,4 @@ Grading notes (if any)
 
 Extra credit attempted (if any)
 -------------------------------
+I implemented Shared Locks and wrote a test for it in sharedlock_test.cc!

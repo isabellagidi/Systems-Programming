@@ -3,17 +3,16 @@ Author and collaborators
 
 Primary student
 ---------------
-(Your name.)
+Isabella Gidi
 
 
 Collaborators
 -------------
-(List any other collaborators and describe help you got from other students
-in the class.)
+[redacted]
 
 
 Citations
 ---------
-(List any other sources consulted. Include shareable links to sessions with
-generative AI tools, if any, and describe any interactions with IDE-based
-coding assistants such as GitHub Copilot.)
+I searched the web for information on shared locks for the extra credit.
+- https://www.youtube.com/watch?v=x2ICz8I07lw 
+- https://www.geeksforgeeks.org/dbms/difference-between-shared-lock-and-exclusive-lock/ 
