@@ -449,3 +449,149 @@ void m61_print_leak_report() {
             info.file, info.line, ptr, info.sz);
     }
 }
+
+
+//EXTRA CREDIT
+//from the pset description:
+/// m61_realloc(ptr, sz, file, line)
+///    1) Changes the size of the dynamic allocation pointed to by `ptr`
+///    to hold at least `sz` bytes. 
+///    2) If the existing allocation cannot be
+///    enlarged, this function makes a new allocation, copies as much data
+///    as possible from the old allocation to the new, and returns a pointer
+///    to the new allocation. 
+///    3) If `ptr` is `nullptr`, behaves like
+///    `m61_malloc(sz, file, line). 
+///    4) `sz` must not be 0. 
+///    5) If a required
+///    allocation fails, returns `nullptr` without freeing the original
+///    block.
+
+void* m61_realloc(void* ptr, size_t sz, const char* file, int line) {
+    // 3) If `ptr` is `nullptr`, behaves like `m61_malloc`.
+    if (ptr == nullptr) {
+        return m61_malloc(sz, file, line);
+    }
+
+    // 4) `sz` must not be 0: free + nullptr.
+    if (sz == 0) {
+        m61_free(ptr, file, line);
+        return nullptr;
+    }
+
+    // check that ptr is a valid active allocation
+    auto it = active_sizes.find(ptr);
+    if (it == active_sizes.end()) {
+        fprintf(stderr, "MEMORY BUG: %s:%d: invalid realloc of pointer %p\n",
+                file, line, ptr);
+        abort();
+    }
+
+    // compute new aligned size just like m61_malloc
+    // guard for padding overflow
+    if (sz > SIZE_MAX - extra_padding) {
+        ++global_stats.nfail;
+        global_stats.fail_size += sz;
+        return nullptr;
+    }
+
+    size_t need = sz + extra_padding;
+
+    if (align_overflow(need)) {
+        ++global_stats.nfail;
+        global_stats.fail_size += sz;
+        return nullptr;
+    }
+
+    size_t new_aligned = align_size(need);
+
+    if (new_aligned < need) {
+        ++global_stats.nfail;
+        global_stats.fail_size += sz;
+        return nullptr;
+    }
+
+    // old metadata
+    active_aligned_sizes& info = it->second;
+    size_t old_sz = info.sz;
+    size_t old_aligned = info.aligned_sz;
+
+    // Case 1: SHRINKING (can always shrink in place)
+    if (new_aligned <= old_aligned) {
+        //update stats and return overflow to free list
+        global_stats.active_size += (sz - old_sz);
+        if (new_aligned < old_aligned) {
+            void* free_ptr = (char*) ptr + new_aligned;
+            size_t free_sz = old_aligned - new_aligned;
+            freed_allocations.insert({ free_ptr, free_sz });
+            m61_coalesce(freed_allocations, free_ptr, free_sz);
+        }
+
+        info.sz = sz;
+        info.aligned_sz = new_aligned;
+
+        // move the canary: [ptr + sz, ptr + new_aligned) must be 0xAB
+        size_t padded_sz = new_aligned - sz;
+        if (padded_sz != 0) {
+            unsigned char* padding_start_ptr = (unsigned char*) ptr + sz;
+            memset(padding_start_ptr, expected_pad_value, padded_sz);
+        }
+
+        return ptr;
+    }
+
+
+    // Case 2: GROWING in place
+    // Try to steal from a free block immediately after
+    size_t extra_aligned = new_aligned - old_aligned;
+    char* old_end = (char*) ptr + old_aligned;
+
+    auto next_it = freed_allocations.find(old_end);
+    if (next_it != freed_allocations.end() && next_it->second >= extra_aligned) {
+        size_t free_sz = next_it->second;
+        freed_allocations.erase(next_it);
+
+        //make sure we only take what we need
+        if (free_sz > extra_aligned) {
+            void* new_free_ptr = old_end + extra_aligned;
+            size_t new_free_sz = free_sz - extra_aligned;
+            freed_allocations.insert({new_free_ptr, new_free_sz});
+        }
+
+        global_stats.active_size += (sz - old_sz);
+        info.sz = sz;
+        info.aligned_sz = new_aligned;
+
+        //rewrite canary
+        size_t padded_sz = new_aligned - sz;
+        if (padded_sz != 0) {
+            unsigned char* padding_start_ptr = (unsigned char*) ptr + sz;
+            memset(padding_start_ptr, expected_pad_value, padded_sz);
+        }
+
+        return ptr;
+    }
+
+    // Case 3: growing but cannot grow in place 
+    void* newptr = m61_malloc(sz, file, line);
+
+    //5) If a required allocation fails, returns `nullptr` without freeing the original block.
+    if (!newptr) {
+        return nullptr;
+    }
+
+    size_t copy_sz;
+
+    if (old_sz < sz) {
+        copy_sz = old_sz;
+    } else { 
+        //2) copies as much data as possible from the old allocation to the new
+        copy_sz = sz;
+    }   
+    memcpy(newptr, ptr, copy_sz);
+    m61_free(ptr, file, line);
+
+    return newptr;
+}
+
+

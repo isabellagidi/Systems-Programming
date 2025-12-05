@@ -13,4 +13,4 @@ N/A
 
 Extra credit attempted (if any)
 -------------------------------
-Not attempted yet
+I implemented m61_realloc according to the manual page. I talked to Andy, and also implemented some optimization features like shrinking or growing in place when possible to my code!!
