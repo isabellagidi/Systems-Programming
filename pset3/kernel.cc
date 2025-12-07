@@ -397,6 +397,9 @@ pid_t syscall_fork();
 [[noreturn]] void sys_exit();
 static void free_process_memory(proc* p);
 
+static intptr_t sys_kill(proc* killer, pid_t victim_pid); // EC 
+int syscall_page_free(uintptr_t addr); // EC 
+
 
 // syscall(regs)
 //    Handle a system call initiated by a `syscall` instruction.
@@ -456,6 +459,14 @@ uintptr_t syscall(regstate* regs) {
     // PHASE 7 
     case SYSCALL_EXIT:
         sys_exit(); 
+    
+    //EC
+    case SYSCALL_KILL: 
+        return sys_kill(current, static_cast<pid_t>(regs->reg_rdi));
+    
+    //EC
+    case SYSCALL_PAGE_FREE:
+        return syscall_page_free(current->regs.reg_rdi);
 
     default:
         proc_panic(current, "Unhandled system call %ld (pid=%d, rip=%p)!\n",
@@ -742,4 +753,75 @@ void memshow() {
             "                          [All processes have exited]\n"
             "\n\n\n\n\n\n\n\n\n\n\n");
     }
+}
+
+
+//EC
+static void destroy_process(proc* p) {
+    if (p->state == P_FREE) {
+        return;
+    }
+
+    // Reuse from Phase 7 
+    free_process_memory(p);
+
+    // Mark process as free
+    p->state = P_FREE;
+    p->pid = 0;      // reset PID
+}
+
+//EC
+static intptr_t sys_kill(proc* killer, pid_t victim_pid) {
+    // invalid PID (so return error)
+    if (victim_pid <= 0 || victim_pid >= MAXNPROC) {
+        return -1;
+    }
+
+    proc* victim = &ptable[victim_pid];
+
+    // No process or already free
+    if (victim->state == P_FREE) {
+        return -1;
+    }
+
+    // To kill the victim: free its memory and mark it free
+    destroy_process(victim);
+    return 0;
+}
+
+//EC
+// syscall_page_free(addr)
+//    Handles the SYSCALL_PAGE_FREE system call.
+//    Frees and unmaps a single user page at `addr` in the current process.
+//    Returns 0 on success. On failure (invalid address or no mapped user page),
+//    returns -1 and makes no changes.
+
+int syscall_page_free(uintptr_t addr) {
+    // Argument validation: must be page-aligned and in user range
+    if ((addr & PAGEOFFMASK) != 0 || addr < PROC_START_ADDR || addr >= MEMSIZE_VIRTUAL) {
+        return -1;
+    }
+
+    vmiter it(current->pagetable, addr);
+
+    // There must be a present, user-accessible mapping here
+    if (!it.present() || !it.user()) {
+        return -1;
+    }
+
+    uintptr_t pa = it.pa();
+
+    // only free allocatable physical addresses
+    if (!allocatable_physical_address(pa)) {
+        // Treat as error and leave mapping alone
+        return -1;
+    }
+
+    // Unmap the page from this process
+    it.map(pa, 0);
+
+    // drop our reference to the physical page
+    kfree(reinterpret_cast<void*>(pa));
+
+    return 0;
 }

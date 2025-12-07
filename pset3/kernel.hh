@@ -179,6 +179,9 @@ void console_memviewer(proc* vmp);
 //    listed below.
 int keyboard_readc();
 
+
+
+
 #define KEY_UP          0300
 #define KEY_RIGHT       0301
 #define KEY_DOWN        0302

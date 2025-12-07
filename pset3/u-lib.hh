@@ -132,4 +132,23 @@ inline pid_t sys_fork() {
     }
 }
 
+//EC
+// sys_kill(pid)
+//    Kill the process with ID pid. Returns 0 on success,
+//    -1 on failure (e.g., invalid PID or no such process).
+inline int sys_kill(pid_t pid) {
+    return make_syscall(SYSCALL_KILL, static_cast<uintptr_t>(pid));
+}
+
+//EC
+// sys_page_free(addr)
+//    Free the page of memory at address `addr` for this process.
+//    Returns 0 on success. On failure (invalid argument or no page mapped),
+//    returns a negative error code (such as -1) and makes no changes.
+//    `addr` must be page-aligned, >= PROC_START_ADDR, and < MEMSIZE_VIRTUAL.
+inline int sys_page_free(void* addr) {
+    return make_syscall(SYSCALL_PAGE_FREE, reinterpret_cast<uintptr_t>(addr));
+}
+
+
 #endif
