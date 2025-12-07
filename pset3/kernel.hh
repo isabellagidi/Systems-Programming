@@ -29,6 +29,8 @@ struct proc {
     int state;                          // process state (see above)
     regstate regs;                      // process's current registers
     // The first 4 members of `proc` must not change, but you can add more.
+
+    unsigned long wakeup_tick;          // tick when this proc should wake (for sleep) //EC
 };
 
 // Process table

@@ -150,5 +150,13 @@ inline int sys_page_free(void* addr) {
     return make_syscall(SYSCALL_PAGE_FREE, reinterpret_cast<uintptr_t>(addr));
 }
 
+//EC
+// sys_sleep(ticks)
+//    Put the calling process to sleep for at least `ticks` timer interrupts
+//    Returns 0 on success, negative value on error
+inline int sys_sleep(unsigned ticks) {
+    return make_syscall(SYSCALL_SLEEP, static_cast<uintptr_t>(ticks));
+}
+
 
 #endif

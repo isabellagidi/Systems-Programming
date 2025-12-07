@@ -397,8 +397,9 @@ pid_t syscall_fork();
 [[noreturn]] void sys_exit();
 static void free_process_memory(proc* p);
 
-static intptr_t sys_kill(proc* killer, pid_t victim_pid); // EC 
-int syscall_page_free(uintptr_t addr); // EC 
+static intptr_t sys_kill(proc* killer, pid_t victim_pid); //EC 
+int syscall_page_free(uintptr_t addr); //EC 
+[[noreturn]] void syscall_sleep(uintptr_t nticks); //EC  
 
 
 // syscall(regs)
@@ -467,6 +468,10 @@ uintptr_t syscall(regstate* regs) {
     //EC
     case SYSCALL_PAGE_FREE:
         return syscall_page_free(current->regs.reg_rdi);
+    
+    //EC
+    case SYSCALL_SLEEP:
+        syscall_sleep(current->regs.reg_rdi);
 
     default:
         proc_panic(current, "Unhandled system call %ld (pid=%d, rip=%p)!\n",
@@ -682,6 +687,16 @@ static void free_process_memory(proc* p) {
 void schedule() {
     pid_t pid = current->pid;
     for (unsigned spins = 1; true; ++spins) {
+        // First, wake any sleeping processes whose time has come
+        unsigned long now = ticks.load();
+        for (int i = 1; i < MAXNPROC; ++i) {
+            if (ptable[i].state == P_BLOCKED
+                && ptable[i].wakeup_tick <= now) {
+                ptable[i].state = P_RUNNABLE;
+            }
+        }
+
+        // Then pick the next runnable process in round-robin order
         pid = (pid + 1) % MAXNPROC;
         if (ptable[pid].state == P_RUNNABLE) {
             run(&ptable[pid]);
@@ -825,3 +840,29 @@ int syscall_page_free(uintptr_t addr) {
 
     return 0;
 }
+
+
+// syscall_sleep(nticks)
+//    Put the current process to sleep for at least `nticks` timer interrupts
+//    Never returns directly; instead it marks the process blocked,
+//    calls schedule(), and later the process is resumed with return value 0
+[[noreturn]] void syscall_sleep(uintptr_t nticks) {
+    // if nticks == 0, this is basically just a yield
+    current->regs.reg_rax = 0;   // return value when we eventually wake
+
+    if (nticks == 0) {
+        // just yield to another process
+        schedule();          // does not return
+    }
+
+    // compute wakeup time based on current ticks
+    unsigned long now = ticks.load();
+    current->wakeup_tick = now + nticks;
+
+    // mark process as blocked so scheduler won't run it until wakeup
+    current->state = P_BLOCKED;
+
+    // qwitch to some other runnable process
+    schedule();              // does not return
+}
+

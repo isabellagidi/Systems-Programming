@@ -258,6 +258,7 @@ inline uint32_t crc32c(const void* buf, size_t sz) {
 #define SYSCALL_EXIT            6
 #define SYSCALL_KILL            7 //EC
 #define SYSCALL_PAGE_FREE       8 //EC
+#define SYSCALL_SLEEP           9 //EC
 
 
 // System call error return values
