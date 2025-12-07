@@ -12,3 +12,5 @@ Grading notes (if any)
 
 Extra credit attempted (if any)
 -------------------------------
+
+I wrote 11 new tests! These test reuse the existing test binaries, but test new things! My code passed all of these new tests!

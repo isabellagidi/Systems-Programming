@@ -1495,6 +1495,64 @@ enqueue("LPN6",
     "./endorder61 -A 10m -RW -B 4096 -o outputs/out.txt $textlg",
     "regular large file, 1-4KiB block I/O, seek table order, limited memory");
 
+#EC (new tests)
+# these test reuse the existing test binaries, but test new things!
+# Empty and tiny files (edge EOF behavior)
+enqueue("E1",
+    "truncate -s 0 inputs/empty.txt; ./cat61 -o outputs/e1.txt inputs/empty.txt",
+    "empty file, byte I/O, correctness",
+    "perf" => 0, "expect" => "inputs/empty.txt");
+
+enqueue("E2",
+    "head -c 1 $texttiny > inputs/onebyte.txt; ./blockcat61 -b 4096 -o outputs/e2.txt inputs/onebyte.txt",
+    "1-byte file, block I/O (oversized block), correctness",
+    "perf" => 0, "expect" => "inputs/onebyte.txt");
+# Random 1-byte blocks (worst-case seeks)
+enqueue("R1",
+    "./shufflecat61 -b 1 -o outputs/r1.txt inputs/text32k.txt",
+    "random order, 1-byte blocks (worst-case cache-thrashing), correctness",
+    "perf" => 0, "compare" => 1);
+# Boundary-crossing seeks (off-by-one around buffer size)
+enqueue("B1",
+    "./cat61 -s 65535 -o outputs/b1.txt $texttiny",  # 64KiB-1
+    "seek to bufsize-1 then read sequentially, correctness",
+    "perf" => 0);
+enqueue("B2",
+    "./cat61 -s 65536 -o outputs/b2.txt inputs/text32k.txt",
+    "seek to bufsize boundary then read sequentially, correctness",
+    "perf" => 0, "compare" => 1);
+enqueue("B3",
+    "./cat61 -s 65537 -o outputs/b3.txt $texttiny",  # 64KiB+1
+    "seek to bufsize+1 then read sequentially, correctness",
+    "perf" => 0);
+# Non-seekable input with skip requested
+enqueue("P1",
+    "cat inputs/text32k.txt | ./cat61 -s 1234 | cat > outputs/p1.txt",
+    "piped input with skip option (non-seekable), should still produce correct tail",
+    "perf" => 0, "compare" => 1);
+# Oscillating small seeks
+# Read in small forward chunks, then seek back slightly and continue, via two passes to exercise many small seeks
+enqueue("O1",
+    "./stridecat61 -t 64 -o outputs/o1.txt $texttiny; ./cat61 -s 31 $texttiny | ./writeat61 -o outputs/o1.txt -p 2048",
+    "oscillating small seeks around boundaries (composed), correctness",
+    "perf" => 0, "compare" => 1);
+# Very large direct writes (bigger than wbuf)
+enqueue("W1",
+    "head -c 131072 $textmd | ./blockwrite61 -b 200000 -o outputs/w1.txt",  # 200k > wbuf_cap
+    "direct large write path (bypass wbuf), correctness",
+    "perf" => 0, "compare" => 1);
+# Sparse write (seek past EOF then write)
+enqueue("S1",
+    "printf X | ./writeat61 -o outputs/sparse.bin -p 1048576; ./cat61 -o outputs/sparse.read outputs/sparse.bin",
+    "seek past EOF then single-byte write (sparse file), correctness",
+    "perf" => 0, "compare" => 1);
+# Reverse on an odd-sized file
+enqueue("RV1",
+    "head -c 12345 inputs/text90k.txt > inputs/odd.txt; ./reverse61 inputs/odd.txt > outputs/rv1.txt",
+    "reverse on odd-sized file (12,345B), correctness",
+    "perf" => 0, "compare" => 1);
+
+
 
 run();
 
